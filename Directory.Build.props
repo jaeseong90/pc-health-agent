@@ -1,0 +1,9 @@
+<Project>
+  <PropertyGroup>
+    <!-- .NET 10 LTS (지원 종료 2028-11-14). 버전을 올릴 때는 이 값과 global.json, 패키지 버전을 함께 변경 -->
+    <NetVersion>net10.0</NetVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+</Project>
