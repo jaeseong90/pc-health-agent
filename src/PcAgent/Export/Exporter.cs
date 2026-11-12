@@ -193,7 +193,7 @@ internal static class Exporter
             "commit_pct", "disk_active_pct", "snapshot_skipped", "top1", "top2", "top3");
         foreach (var e in events)
         {
-            var top = RankProcesses(e).Take(3).Select(p => p.Name).ToList();
+            var top = e.RankedProcesses().Take(3).Select(p => p.Name).ToList();
             csv.Row(e.Id.ToString("N")[..12], KindLabel(e.Kind),
                 Local(e.StartedUtc, tz).ToString("yyyy-MM-dd HH:mm:ss"),
                 e.EndedUtc is { } end ? Local(end, tz).ToString("yyyy-MM-dd HH:mm:ss") : null,
@@ -210,7 +210,7 @@ internal static class Exporter
         foreach (var e in events)
         {
             int rank = 0;
-            foreach (var p in RankProcesses(e))
+            foreach (var p in e.RankedProcesses())
             {
                 csv.Row(e.Id.ToString("N")[..12], KindLabel(e.Kind), Local(e.StartedUtc, tz).ToString("yyyy-MM-dd HH:mm:ss"),
                     ++rank, p.Name, p.Publisher, p.Path, p.Instances, p.CpuPercent,
@@ -228,15 +228,6 @@ internal static class Exporter
                 l.Provider, l.EventId, l.Level, l.Detail, l.Value);
         }
     }
-
-    /// <summary>이벤트 유형별 기준(CPU%·메모리·I/O)으로 정렬한 프로세스 목록.</summary>
-    internal static IEnumerable<ProcessUsage> RankProcesses(PressureRecord e) =>
-        e.Processes is null ? [] : e.Kind switch
-        {
-            PressureKind.Memory => e.Processes.OrderByDescending(p => p.PrivateBytes),
-            PressureKind.Disk => e.Processes.OrderByDescending(p => p.IoBytesPerSec),
-            _ => e.Processes.OrderByDescending(p => p.CpuPercent),
-        };
 
     internal static DateTimeOffset Local(DateTimeOffset utc, TimeZoneInfo tz) => TimeZoneInfo.ConvertTime(utc, tz);
 
@@ -259,6 +250,7 @@ internal static class Exporter
     {
         "AlreadyWindows11" => "사용 중",
         "Ready" => "업그레이드 가능",
+        "NeedsConfig" => "설정 변경 후 가능",
         "NotReady" => "미지원",
         _ => "확인 필요",
     };

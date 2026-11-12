@@ -52,9 +52,26 @@ public class PressureDetectorTests
 
         Assert.NotNull(end);
         Assert.Equal(TransitionType.Ended, end.Value.Type);
-        Assert.Equal(T0.AddSeconds(95), end.Value.EndedUtc);
+        // 종료 시각은 회복이 "확인된" 95초가 아니라 회복이 "시작된" 65초 (지속 시간 과대 계상 방지)
+        Assert.Equal(T0.AddSeconds(65), end.Value.EndedUtc);
         Assert.Equal(99, end.Value.Peak);
         Assert.False(d.IsActive);
+    }
+
+    [Fact]
+    public void Reconfigure_keeps_active_event()
+    {
+        var d = Create();
+        for (int s = 0; s <= 30; s += 5) d.Update(T0.AddSeconds(s), true, false, 95);
+        Assert.True(d.IsActive);
+
+        d.Reconfigure(TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10), TimeSpan.FromMinutes(2));
+
+        Assert.True(d.IsActive);
+        Assert.Null(d.Update(T0.AddSeconds(35), false, true, 10));
+        var end = d.Update(T0.AddSeconds(45), false, true, 10);   // 새 회복 기준 10초 적용
+        Assert.Equal(TransitionType.Ended, end!.Value.Type);
+        Assert.Equal(T0.AddSeconds(35), end.Value.EndedUtc);
     }
 
     [Fact]

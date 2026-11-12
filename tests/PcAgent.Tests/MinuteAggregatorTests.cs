@@ -44,6 +44,22 @@ public class MinuteAggregatorTests
     }
 
     [Fact]
+    public void Reconfigure_mid_minute_keeps_partial_minute_and_uses_new_interval()
+    {
+        var agg = new MinuteAggregator(Thresholds, 5);
+        agg.Add(Sample(T0, cpu: 95));
+        agg.Add(Sample(T0.AddSeconds(5), cpu: 95));
+
+        agg.Reconfigure(Thresholds with { CpuHigh = 99 }, 10);
+        agg.Add(Sample(T0.AddSeconds(10), cpu: 95));   // 새 기준(99)에서는 포화 아님
+
+        var m = agg.Flush();
+        Assert.Equal(3, m!.Samples);
+        Assert.Equal(5 + 5 + 10, m.CoveredSeconds);
+        Assert.Equal(10, m.CpuHighSeconds);
+    }
+
+    [Fact]
     public void Missing_disk_counter_yields_null_disk_metrics()
     {
         var agg = new MinuteAggregator(Thresholds, 5);

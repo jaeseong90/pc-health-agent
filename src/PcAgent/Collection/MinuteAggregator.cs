@@ -8,16 +8,33 @@ public readonly record struct SampleThresholds(double CpuHigh, double MemAvailLo
 
 /// <summary>
 /// 5초 샘플을 1분 단위로 집계합니다. 분이 바뀌는 순간 이전 분의 결과를 반환합니다.
+/// 시간(초)은 샘플마다 그 시점의 측정 주기만큼 더하므로, 도중에 설정이 바뀌어도 정확합니다.
 /// </summary>
-public sealed class MinuteAggregator(SampleThresholds thresholds, int intervalSeconds)
+public sealed class MinuteAggregator
 {
+    private SampleThresholds _thresholds;
+    private int _intervalSeconds;
+
     private bool _has;
     private DateTimeOffset _minute;
-    private int _n;
+    private int _n, _covered;
     private double _cpuSum, _cpuMax, _availSum, _availMin, _commitSum, _commitMax;
     private double _hardSum, _diskSum, _diskMax, _queueSum;
     private int _hardN, _diskN, _queueN;
-    private int _cpuHigh, _memPressure, _diskBusy;
+    private int _cpuHighSec, _memPressureSec, _diskBusySec;
+
+    public MinuteAggregator(SampleThresholds thresholds, int intervalSeconds)
+    {
+        _thresholds = thresholds;
+        _intervalSeconds = intervalSeconds;
+    }
+
+    /// <summary>진행 중인 1분 집계를 유지한 채 기준만 바꿉니다(설정 변경 시).</summary>
+    public void Reconfigure(SampleThresholds thresholds, int intervalSeconds)
+    {
+        _thresholds = thresholds;
+        _intervalSeconds = intervalSeconds;
+    }
 
     public MetricMinute? Add(in SystemSample s)
     {
@@ -35,7 +52,9 @@ public sealed class MinuteAggregator(SampleThresholds thresholds, int intervalSe
             _availMin = double.MaxValue;
         }
 
+        int sec = _intervalSeconds;
         _n++;
+        _covered += sec;
         _cpuSum += s.CpuPercent;
         _cpuMax = Math.Max(_cpuMax, s.CpuPercent);
         _availSum += s.MemAvailPercent;
@@ -47,11 +66,11 @@ public sealed class MinuteAggregator(SampleThresholds thresholds, int intervalSe
         {
             _diskSum += d; _diskN++;
             _diskMax = Math.Max(_diskMax, d);
-            if (d >= thresholds.DiskBusy) _diskBusy++;
+            if (d >= _thresholds.DiskBusy) _diskBusySec += sec;
         }
         if (s.DiskQueueLength is { } q) { _queueSum += q; _queueN++; }
-        if (s.CpuPercent >= thresholds.CpuHigh) _cpuHigh++;
-        if (s.MemAvailPercent <= thresholds.MemAvailLow || s.CommitPercent >= thresholds.CommitHigh) _memPressure++;
+        if (s.CpuPercent >= _thresholds.CpuHigh) _cpuHighSec += sec;
+        if (s.MemAvailPercent <= _thresholds.MemAvailLow || s.CommitPercent >= _thresholds.CommitHigh) _memPressureSec += sec;
 
         return completed;
     }
@@ -68,7 +87,7 @@ public sealed class MinuteAggregator(SampleThresholds thresholds, int intervalSe
     {
         MinuteUtc = _minute,
         Samples = _n,
-        CoveredSeconds = _n * intervalSeconds,
+        CoveredSeconds = _covered,
         CpuAvg = R(_cpuSum / _n),
         CpuMax = R(_cpuMax),
         MemAvailAvg = R(_availSum / _n),
@@ -79,20 +98,20 @@ public sealed class MinuteAggregator(SampleThresholds thresholds, int intervalSe
         DiskActiveAvg = _diskN > 0 ? R(_diskSum / _diskN) : null,
         DiskActiveMax = _diskN > 0 ? R(_diskMax) : null,
         DiskQueueAvg = _queueN > 0 ? Math.Round(_queueSum / _queueN, 2) : null,
-        CpuHighSeconds = _cpuHigh * intervalSeconds,
-        MemPressureSeconds = _memPressure * intervalSeconds,
-        DiskBusySeconds = _diskBusy * intervalSeconds,
+        CpuHighSeconds = _cpuHighSec,
+        MemPressureSeconds = _memPressureSec,
+        DiskBusySeconds = _diskBusySec,
     };
 
     private void Reset()
     {
         _has = false;
-        _n = 0;
+        _n = _covered = 0;
         _cpuSum = _cpuMax = _availSum = _commitSum = _commitMax = 0;
         _availMin = double.MaxValue;
         _hardSum = _diskSum = _diskMax = _queueSum = 0;
         _hardN = _diskN = _queueN = 0;
-        _cpuHigh = _memPressure = _diskBusy = 0;
+        _cpuHighSec = _memPressureSec = _diskBusySec = 0;
     }
 
     private static DateTimeOffset Truncate(DateTimeOffset t) =>

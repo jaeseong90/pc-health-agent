@@ -62,6 +62,15 @@ public sealed class PressureRecord
     public double? DiskActivePercent { get; set; }
     public bool SnapshotSkipped { get; set; }
     public List<ProcessUsage>? Processes { get; set; }
+
+    /// <summary>이벤트 유형별 기준(CPU%·메모리·I/O)으로 정렬한 프로세스 목록.</summary>
+    public IEnumerable<ProcessUsage> RankedProcesses() =>
+        Processes is null ? [] : Kind switch
+        {
+            PressureKind.Memory => Processes.OrderByDescending(p => p.PrivateBytes),
+            PressureKind.Disk => Processes.OrderByDescending(p => p.IoBytesPerSec),
+            _ => Processes.OrderByDescending(p => p.CpuPercent),
+        };
 }
 
 /// <summary>같은 실행 파일의 인스턴스를 합산한 프로세스 사용량(예: chrome 30개 → 1행).</summary>

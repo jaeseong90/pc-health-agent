@@ -113,7 +113,7 @@ internal static class HtmlReport
             foreach (var e in events.OrderByDescending(e => e.StartedUtc).Take(30))
             {
                 var dur = e.EndedUtc is { } end ? Duration(end - e.StartedUtc) : "진행 중/기록 없음";
-                var top = string.Join(", ", Exporter.RankProcesses(e).Take(3).Select(p => p.Name));
+                var top = string.Join(", ", e.RankedProcesses().Take(3).Select(p => p.Name));
                 if (e.SnapshotSkipped) top = "(빈도 제한으로 스냅샷 생략)";
                 w.Write($"<tr><td>{Exporter.Local(e.StartedUtc, tz):MM-dd HH:mm}</td><td>{Exporter.KindLabel(e.Kind)}</td><td>{dur}</td><td class=\"n\">{e.Peak:0.#}%</td><td>{H(top)}</td></tr>");
             }

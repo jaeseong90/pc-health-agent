@@ -145,6 +145,93 @@ public class UpgradeAdvisorTests
     }
 
     [Fact]
+    public void Few_work_hours_fall_back_to_all_hours_instead_of_insufficient()
+    {
+        // 업무시간 6시간(평일 1일 10~16시) + 주말 40시간, 모두 메모리 부족 25%
+        var metrics = new List<MetricMinute>();
+        void AddRange(DateTimeOffset start, int minutes)
+        {
+            for (int m = 0; m < minutes; m++)
+                metrics.Add(new MetricMinute { MinuteUtc = start.AddMinutes(m), Samples = 12, CoveredSeconds = 60, MemPressureSeconds = 15 });
+        }
+        AddRange(TestData.Monday.AddHours(10), 6 * 60);
+        AddRange(TestData.Monday.AddDays(5), 20 * 60);   // 토요일
+        AddRange(TestData.Monday.AddDays(6), 20 * 60);   // 일요일
+
+        var r = Analyze(TestData.Inventory(ramMb: 8192), metrics);
+
+        Assert.True(r.SufficientData);
+        Assert.Equal("전체 시간 기준", r.Basis);
+        Assert.Contains(r.Recommendations, x => x.Code == "RAM_UPGRADE");
+    }
+
+    [Fact]
+    public void Dominance_counts_only_events_with_process_snapshots()
+    {
+        var events = new List<PressureRecord>();
+        for (int i = 0; i < 4; i++)
+            events.Add(TestData.MemoryEvent(TestData.Monday.AddHours(11).AddMinutes(i * 15), ("LeakyApp", 6000), ("chrome", 1500), ("Teams", 900)));
+        for (int i = 0; i < 6; i++)
+        {
+            var skipped = TestData.MemoryEvent(TestData.Monday.AddHours(13).AddMinutes(i * 5));
+            skipped.Processes = null;
+            skipped.SnapshotSkipped = true;   // 쿨다운으로 스냅샷 생략
+            events.Add(skipped);
+        }
+
+        var r = Analyze(TestData.Inventory(), TestData.WorkdayMetrics(5, memPressurePct: 3), events);
+
+        var rec = Assert.Single(r.Recommendations, x => x.Code == "SOFTWARE_REVIEW");
+        Assert.Contains("4건 중 4건", rec.Detail);
+    }
+
+    [Fact]
+    public void Memory_and_cpu_software_reviews_for_different_programs_are_separate()
+    {
+        var events = Enumerable.Range(0, 4)
+            .Select(i => TestData.MemoryEvent(TestData.Monday.AddHours(11 + i), ("LeakyApp", 6000), ("chrome", 1500)))
+            .ToList();
+        events.AddRange(Enumerable.Range(0, 4).Select(i => new PressureRecord
+        {
+            Id = Guid.NewGuid(),
+            Kind = PressureKind.Cpu,
+            StartedUtc = TestData.Monday.AddDays(1).AddHours(11 + i),
+            Processes = [new ProcessUsage { Name = "chrome", CpuPercent = 60 }, new ProcessUsage { Name = "LeakyApp", CpuPercent = 5 }],
+        }));
+
+        var r = Analyze(TestData.Inventory(), TestData.WorkdayMetrics(5, memPressurePct: 3, cpuHighPct: 5), events);
+
+        var reviews = r.Recommendations.Where(x => x.Code == "SOFTWARE_REVIEW").Select(x => x.Title).ToList();
+        Assert.Contains("프로그램 점검: LeakyApp", reviews);
+        Assert.Contains("프로그램 점검: chrome", reviews);
+    }
+
+    [Fact]
+    public void Ltsc_edition_is_not_forced_to_windows11()
+    {
+        var inv = TestData.Inventory(win11: false, cpu: "Intel(R) Core(TM) i5-7500 CPU @ 3.40GHz");
+        inv.OsEdition = "EnterpriseS";
+        var r = Analyze(inv);
+
+        Assert.DoesNotContain(r.Recommendations, x => x.Code is "PC_REPLACE" or "OS_UPGRADE");
+        Assert.Contains(r.Findings, f => f.Contains("LTSC"));
+        Assert.Equal("Ok", r.Verdict);
+    }
+
+    [Fact]
+    public void Legacy_boot_windows10_gets_config_upgrade_not_replacement()
+    {
+        var inv = TestData.Inventory(win11: false);
+        inv.IsUefi = false;
+        var r = Analyze(inv);
+
+        var rec = Assert.Single(r.Recommendations);
+        Assert.Equal("OS_UPGRADE", rec.Code);
+        Assert.Contains("설정 변경", rec.Title);
+        Assert.Equal("Watch", r.Verdict);
+    }
+
+    [Fact]
     public void Percentile_interpolates()
     {
         Assert.Equal(5.5, UpgradeAdvisor.Percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 50), 3);

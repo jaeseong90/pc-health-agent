@@ -6,14 +6,18 @@ using PcAgent.Privacy;
 namespace PcAgent.Collection;
 
 /// <summary>
-/// 자원 부족 시점의 상위 프로세스를 기록합니다. 1초 간격 두 번 측정해 CPU%·I/O 속도를 계산합니다.
+/// 자원 부족 시점의 상위 프로세스를 기록합니다. 약 1초 간격으로 두 번 측정해 CPU%·I/O 속도를 계산합니다.
 /// 창 제목, 명령줄 인수, URL 등은 수집하지 않습니다.
 /// </summary>
 internal sealed class ProcessSnapshotter(ProcessMasker masker)
 {
     private readonly Dictionary<string, string?> _publisherCache = new(StringComparer.OrdinalIgnoreCase);
 
-    private readonly record struct Counters(long CreationTime, long CpuTime, ulong IoBytes);
+    /// <summary>설정 변경 시 교체됩니다.</summary>
+    public ProcessMasker Masker { get; set; } = masker;
+
+    /// <summary>Timestamp: 이 프로세스의 카운터를 읽은 시점(Stopwatch). 프로세스별 실제 측정 간격 계산용.</summary>
+    private readonly record struct Counters(long CreationTime, long CpuTime, ulong IoBytes, long Timestamp);
 
     public async Task<List<ProcessUsage>> CaptureAsync(int topN, CancellationToken ct)
     {
@@ -26,11 +30,9 @@ internal sealed class ProcessSnapshotter(ProcessMasker masker)
             }
         }
 
-        long t0 = Stopwatch.GetTimestamp();
         await Task.Delay(1000, ct).ConfigureAwait(false);
 
         var processes = Process.GetProcesses();
-        double elapsed = Math.Max(0.1, Stopwatch.GetElapsedTime(t0).TotalSeconds);
         int cpuCount = Math.Max(1, Environment.ProcessorCount);
         var groups = new Dictionary<(string Name, string? Path), ProcessUsage>();
 
@@ -60,11 +62,13 @@ internal sealed class ProcessSnapshotter(ProcessMasker masker)
                     && first.TryGetValue(pid, out var before)
                     && before.CreationTime == now.CreationTime)
                 {
+                    // 전체 열거 시간이 아니라 이 프로세스를 두 번 읽은 실제 간격으로 나눈다
+                    double elapsed = Math.Max(0.1, Stopwatch.GetElapsedTime(before.Timestamp, now.Timestamp).TotalSeconds);
                     cpu = Math.Clamp((now.CpuTime - before.CpuTime) / 1e7 / elapsed / cpuCount * 100.0, 0, 100);
                     if (now.IoBytes >= before.IoBytes) io = (now.IoBytes - before.IoBytes) / elapsed;
                 }
 
-                var (displayName, displayPath, masked) = masker.Apply(name, rawPath);
+                var (displayName, displayPath, masked) = Masker.Apply(name, rawPath);
                 var key = (displayName, displayPath);
                 if (!groups.TryGetValue(key, out var g))
                 {
@@ -106,7 +110,7 @@ internal sealed class ProcessSnapshotter(ProcessMasker masker)
 
         ulong io = 0;
         if (Native.GetProcessIoCounters(h, out var ioc)) io = ioc.ReadTransferCount + ioc.WriteTransferCount;
-        counters = new Counters(creation, kernel + user, io);
+        counters = new Counters(creation, kernel + user, io, Stopwatch.GetTimestamp());
 
         if (readPath)
         {
@@ -119,7 +123,9 @@ internal sealed class ProcessSnapshotter(ProcessMasker masker)
 
     private string? GetPublisher(string? rawPath)
     {
-        if (rawPath is null) return null;
+        // 네트워크 경로(UNC, WebDAV, 네트워크 드라이브)는 읽지 않는다: SYSTEM 이 파일을 열면
+        // PC 계정으로 원격 서버에 인증하게 되어 NTLM 릴레이 공격에 악용될 수 있음
+        if (rawPath is null || !IsLocalFixedDrivePath(rawPath)) return null;
         if (_publisherCache.TryGetValue(rawPath, out var cached)) return cached;
 
         string? publisher = null;
@@ -136,5 +142,19 @@ internal sealed class ProcessSnapshotter(ProcessMasker masker)
         if (_publisherCache.Count > 2000) _publisherCache.Clear();
         _publisherCache[rawPath] = publisher;
         return publisher;
+    }
+
+    /// <summary>"C:\..." 형태이고 해당 드라이브가 로컬 고정 디스크인 경우만 true.</summary>
+    internal static bool IsLocalFixedDrivePath(string path)
+    {
+        if (path.Length < 3 || !char.IsAsciiLetter(path[0]) || path[1] != ':' || path[2] != '\\') return false;
+        try
+        {
+            return new DriveInfo(path[..1]).DriveType == DriveType.Fixed;
+        }
+        catch
+        {
+            return false;
+        }
     }
 }

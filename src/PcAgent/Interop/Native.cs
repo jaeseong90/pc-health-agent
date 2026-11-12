@@ -156,7 +156,23 @@ internal static unsafe partial class Native
         SafeFileHandle device, uint ioControlCode, void* inBuffer, uint inBufferSize,
         void* outBuffer, uint outBufferSize, out uint bytesReturned, nint overlapped);
 
-    // ---------------- 이벤트 로그 (wevtapi) ----------------
+    // ---------------- Windows 이벤트 로그 쓰기 (advapi32) ----------------
+
+    internal const ushort EVENTLOG_ERROR_TYPE = 0x0001;
+
+    [LibraryImport("advapi32.dll", EntryPoint = "RegisterEventSourceW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    internal static partial nint RegisterEventSource(string? uncServerName, string sourceName);
+
+    [LibraryImport("advapi32.dll", EntryPoint = "ReportEventW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool ReportEvent(
+        nint eventLog, ushort type, ushort category, uint eventId, nint userSid, ushort numStrings, uint dataSize, char** strings, nint rawData);
+
+    [LibraryImport("advapi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool DeregisterEventSource(nint eventLog);
+
+    // ---------------- 이벤트 로그 읽기 (wevtapi) ----------------
 
     internal const uint EvtQueryChannelPath = 0x1;
     internal const uint EvtQueryReverseDirection = 0x200;

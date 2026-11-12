@@ -12,7 +12,9 @@ public enum CpuSupport
 
 public sealed class Win11Readiness
 {
-    /// <summary>AlreadyWindows11, Ready, NotReady, Unknown</summary>
+    /// <summary>
+    /// AlreadyWindows11, Ready, NeedsConfig(펌웨어 설정만 바꾸면 됨), NotReady(하드웨어 미충족), Unknown
+    /// </summary>
     public string Status { get; set; } = "Unknown";
     public List<string> Issues { get; set; } = [];
 }
@@ -31,18 +33,21 @@ public static partial class Win11Check
             return r;
         }
 
-        var failures = new List<string>();
+        var failures = new List<string>();   // 하드웨어 미충족 → 교체 대상
+        var configs = new List<string>();    // 펌웨어 설정만 바꾸면 되는 항목
         var unknowns = new List<string>();
 
         switch (inv.TpmVersion)
         {
             case "2.0": break;
             case null: unknowns.Add("TPM 확인 불가"); break;
-            case "none": failures.Add("TPM 없음"); break;
+            // 8세대 이상 Intel / Ryzen 2000 이상은 펌웨어 TPM(PTT/fTPM)이 있으므로, 미감지는 대개 BIOS 에서 꺼진 상태
+            case "none": configs.Add("TPM 미감지 — BIOS 에서 TPM(PTT/fTPM) 활성화 확인"); break;
             default: failures.Add($"TPM {inv.TpmVersion} (2.0 필요)"); break;
         }
 
-        if (inv.IsUefi == false) failures.Add("레거시 BIOS (UEFI/보안 부팅 필요)");
+        // UEFI 지원 PC 를 레거시(CSM) 모드로 설치한 경우가 많음 → MBR2GPT 로 전환 가능
+        if (inv.IsUefi == false) configs.Add("레거시 BIOS 부팅 — UEFI 전환 필요(MBR2GPT)");
         else if (inv.IsUefi is null) unknowns.Add("펌웨어 유형 확인 불가");
 
         if (inv.RamInstalledMb is > 0 and < 4096) failures.Add($"메모리 {inv.RamInstalledMb / 1024.0:0.#}GB (4GB 필요)");
@@ -58,10 +63,19 @@ public static partial class Win11Check
             case CpuSupport.Unknown: unknowns.Add($"CPU 지원 여부 자동 판별 불가 ({inv.CpuName ?? "알 수 없음"})"); break;
         }
 
-        r.Issues = [.. failures, .. unknowns];
-        r.Status = failures.Count > 0 ? "NotReady" : unknowns.Count > 0 ? "Unknown" : "Ready";
+        r.Issues = [.. failures, .. configs, .. unknowns];
+        r.Status = failures.Count > 0 ? "NotReady"
+            : configs.Count > 0 ? "NeedsConfig"
+            : unknowns.Count > 0 ? "Unknown"
+            : "Ready";
         return r;
     }
+
+    /// <summary>Windows 10 Enterprise LTSC / IoT Enterprise LTSC — 일반판과 지원 주기가 다름.</summary>
+    public static bool IsLtsc(string? editionId) =>
+        editionId is not null &&
+        (editionId.StartsWith("EnterpriseS", StringComparison.OrdinalIgnoreCase) ||
+         editionId.StartsWith("IoTEnterpriseS", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Intel 8세대+, AMD Ryzen 2000+ (Zen+) 를 지원으로 추정.</summary>
     public static CpuSupport EvaluateCpu(string? cpuName)

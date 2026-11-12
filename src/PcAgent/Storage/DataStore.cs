@@ -8,6 +8,7 @@ namespace PcAgent.Storage;
 /// 로컬 파일 저장소. DB 없이 일 단위 파일에 append 만 합니다(분당 1회, 약 150바이트).
 ///   data\metrics-yyyyMMdd.csv   : 1분 집계 지표 (UTC 날짜 기준)
 ///   data\pressure-yyyyMMdd.jsonl: 자원 부족 이벤트(시작/종료 레코드)
+/// 사용자가 파일을 엑셀 등으로 열어 잠그면 줄을 메모리에 모아 두었다가 잠금이 풀리면 씁니다.
 /// </summary>
 public sealed class DataStore(string dataDir)
 {
@@ -17,10 +18,18 @@ public sealed class DataStore(string dataDir)
 
     private const string MetricsPrefix = "metrics-";
     private const string PressurePrefix = "pressure-";
+    private const int MaxPendingChars = 2 * 1024 * 1024;
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
     private static readonly UTF8Encoding Utf8NoBom = new(false);
 
+    private readonly Dictionary<string, Pending> _pending = new(StringComparer.OrdinalIgnoreCase);
+
+    private sealed record Pending(string? Header, StringBuilder Lines);
+
     public string DataDir => dataDir;
+
+    /// <summary>잠금 때문에 아직 쓰지 못한 줄이 있는 파일 수.</summary>
+    public int PendingFiles => _pending.Count;
 
     // ---------------- 쓰기 ----------------
 
@@ -47,12 +56,61 @@ public sealed class DataStore(string dataDir)
         Append(path, Json.Serialize(record, AgentJsonContext.Default.PressureRecord), header: null);
     }
 
-    private static void Append(string path, string line, string? header)
+    /// <summary>밀려 있는 줄을 다시 써 봅니다(종료 시에도 호출).</summary>
+    public void FlushPending(string? except = null)
     {
-        var sb = new StringBuilder(line.Length + (header?.Length ?? 0) + 4);
-        if (header is not null && !File.Exists(path)) sb.Append(header).Append('\n');
-        sb.Append(line).Append('\n');
-        File.AppendAllText(path, sb.ToString(), Utf8NoBom);
+        if (_pending.Count == 0) return;
+        foreach (var path in _pending.Keys.ToList())
+        {
+            if (except is not null && string.Equals(path, except, StringComparison.OrdinalIgnoreCase)) continue;
+            var p = _pending[path];
+            if (TryAppend(path, p.Lines.ToString(), p.Header))
+            {
+                _pending.Remove(path);
+                Log.Info($"잠금이 풀려 밀린 기록을 저장했습니다: {Path.GetFileName(path)}");
+            }
+        }
+    }
+
+    private void Append(string path, string line, string? header)
+    {
+        FlushPending(except: path);
+
+        var text = new StringBuilder();
+        bool wasPending = _pending.Remove(path, out var pending);
+        if (wasPending) text.Append(pending!.Lines);
+        text.Append(line).Append('\n');
+
+        if (TryAppend(path, text.ToString(), header))
+        {
+            if (wasPending) Log.Info($"잠금이 풀려 밀린 기록을 저장했습니다: {Path.GetFileName(path)}");
+            return;
+        }
+
+        // 너무 오래 잠겨 있으면 오래된 줄부터 버림(줄 단위)
+        int excess = text.Length - MaxPendingChars;
+        if (excess > 0)
+        {
+            int cut = text.ToString().IndexOf('\n', excess);
+            text.Remove(0, cut < 0 ? text.Length : cut + 1);
+        }
+        _pending[path] = new Pending(header, text);
+        if (!wasPending) Log.Warn($"다른 프로그램이 파일을 잠가 기록을 잠시 메모리에 보관합니다: {Path.GetFileName(path)} (엑셀 등으로 열려 있으면 닫아 주세요)");
+    }
+
+    /// <summary>공유 위반(다른 프로세스의 잠금)만 false, 그 외 오류는 예외.</summary>
+    private static bool TryAppend(string path, string text, string? header)
+    {
+        try
+        {
+            var content = header is not null && !File.Exists(path) ? header + "\n" + text : text;
+            File.AppendAllText(path, content, Utf8NoBom);
+            return true;
+        }
+        catch (IOException ex) when ((ex.HResult & 0xFFFF) is 32 or 33) // ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
+        {
+            return false;
+        }
     }
 
     // ---------------- 읽기 (내보내기 시) ----------------
@@ -72,10 +130,14 @@ public sealed class DataStore(string dataDir)
         return result;
     }
 
-    /// <summary>시작/종료 레코드를 합쳐 이벤트 목록을 반환합니다.</summary>
+    /// <summary>
+    /// 시작/종료 레코드를 합쳐 이벤트 목록을 반환합니다. 레코드 순서와 무관하게 동작하며,
+    /// 시작 레코드가 없는 종료 레코드(시작 기록 전에 서비스가 멈춘 경우 등)는 버립니다.
+    /// </summary>
     public List<PressureRecord> ReadPressureEvents(DateTimeOffset fromUtc, DateTimeOffset toUtc)
     {
-        var map = new Dictionary<Guid, PressureRecord>();
+        var starts = new Dictionary<Guid, PressureRecord>();
+        var ends = new Dictionary<Guid, PressureRecord>();
         foreach (var file in FilesInRange(PressurePrefix, ".jsonl", fromUtc.AddDays(-1), toUtc))
         {
             foreach (var line in ReadLinesShared(file))
@@ -91,22 +153,18 @@ public sealed class DataStore(string dataDir)
                     continue; // 전원 차단 등으로 잘린 줄
                 }
                 if (rec is null) continue;
-
-                if (map.TryGetValue(rec.Id, out var existing))
-                {
-                    if (rec.Phase == PressureRecord.PhaseEnd)
-                    {
-                        existing.EndedUtc = rec.EndedUtc;
-                        existing.Peak = Math.Max(existing.Peak, rec.Peak);
-                    }
-                }
-                else
-                {
-                    map[rec.Id] = rec;
-                }
+                if (rec.Phase == PressureRecord.PhaseEnd) ends[rec.Id] = rec;
+                else starts.TryAdd(rec.Id, rec);
             }
         }
-        return map.Values
+
+        foreach (var start in starts.Values)
+        {
+            if (!ends.TryGetValue(start.Id, out var end)) continue;
+            start.EndedUtc = end.EndedUtc;
+            start.Peak = Math.Max(start.Peak, end.Peak);
+        }
+        return starts.Values
             .Where(e => e.StartedUtc >= fromUtc && e.StartedUtc <= toUtc)
             .OrderBy(e => e.StartedUtc)
             .ToList();
@@ -183,7 +241,7 @@ public sealed class DataStore(string dataDir)
 
     private static IEnumerable<string> ReadLinesShared(string path)
     {
-        // 서비스가 쓰는 중에도 읽을 수 있도록 공유 모드로 연다
+        // 서비스가 쓰는 중이거나 다른 프로그램이 열어 둔 상태에서도 읽을 수 있도록 공유 모드로 연다
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var reader = new StreamReader(fs, Encoding.UTF8);
         while (reader.ReadLine() is { } line) yield return line;

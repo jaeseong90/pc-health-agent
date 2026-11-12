@@ -6,6 +6,7 @@ namespace PcAgent.Hosting;
 
 /// <summary>
 /// 파일럿용 간단 설치/제거. 관리자 권한 cmd 에서 PcAgent.exe install / uninstall.
+/// 항상 기본 경로(%ProgramData%\PcAgent)를 사용합니다.
 /// </summary>
 internal static class ServiceInstaller
 {
@@ -30,26 +31,26 @@ internal static class ServiceInstaller
         if (!string.Equals(Path.GetFullPath(source), Path.GetFullPath(targetExe), StringComparison.OrdinalIgnoreCase))
             File.Copy(source, targetExe, overwrite: true);
 
-        // 데이터 폴더: SYSTEM/관리자만 쓰기, 일반 사용자는 읽기(본인 PC 데이터 확인·내보내기 가능)
-        Directory.CreateDirectory(paths.DataDir);
-        Run("icacls", paths.Root, "/inheritance:r", "/grant:r",
-            "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX", "/T", "/Q");
+        // 데이터 폴더: SYSTEM/관리자만 쓰기, 일반 사용자는 읽기(본인 PC 데이터 확인·내보내기 가능).
+        // 일반 사용자가 미리 만들어 둔 폴더나 링크는 치우고 원자적으로(생성과 동시에 권한 적용) 다시 만든다.
+        SecureDirectory.PrepareForInstall(paths, Console.WriteLine);
         if (!File.Exists(paths.ConfigFile)) File.WriteAllText(paths.ConfigFile, new AgentConfig().ToJson());
 
         var binPath = $"\"{targetExe}\" --service";
-        if (exists)
-            Run("sc.exe", "config", AgentPaths.ServiceName, "binPath=", binPath, "start=", "delayed-auto");
-        else
-            Run("sc.exe", "create", AgentPaths.ServiceName, "binPath=", binPath, "start=", "delayed-auto", "DisplayName=", DisplayName);
+        int rc = exists
+            ? Run("sc.exe", "config", AgentPaths.ServiceName, "binPath=", binPath, "start=", "delayed-auto")
+            : Run("sc.exe", "create", AgentPaths.ServiceName, "binPath=", binPath, "start=", "delayed-auto", "DisplayName=", DisplayName);
+        if (rc != 0) return Fail("서비스 등록에 실패했습니다.");
         Run("sc.exe", "description", AgentPaths.ServiceName, Description);
         Run("sc.exe", "failure", AgentPaths.ServiceName, "reset=", "86400", "actions=", "restart/60000/restart/60000/none/0");
-        Run("sc.exe", "start", AgentPaths.ServiceName);
+        if (Run("sc.exe", "start", AgentPaths.ServiceName) != 0)
+            return Fail("서비스를 시작하지 못했습니다. 이벤트 뷰어 > Windows 로그 > 응용 프로그램에서 'PcAgent' 오류를 확인하세요.");
 
         Console.WriteLine();
         Console.WriteLine($"설치 완료: {targetExe}");
         Console.WriteLine($"데이터 폴더: {paths.Root}");
         Console.WriteLine("서비스는 '지연된 자동 시작'으로 등록되어 부팅 직후 부하를 주지 않습니다.");
-        Console.WriteLine("2주 이상 수집 후  PcAgent.exe export  로 결과를 내보내세요.");
+        Console.WriteLine("2주 이상 수집 후  \"C:\\Program Files\\PcAgent\\PcAgent.exe\" export  로 결과를 내보내세요.");
         return 0;
     }
 
@@ -84,7 +85,8 @@ internal static class ServiceInstaller
         if (running.StartsWith(InstallDir, StringComparison.OrdinalIgnoreCase))
         {
             // 실행 중인 exe 는 지울 수 없으므로 잠시 후 삭제
-            Process.Start(new ProcessStartInfo("cmd.exe", $"/c timeout /t 3 /nobreak >nul & rmdir /s /q \"{InstallDir}\"")
+            var cmd = Path.Combine(Environment.SystemDirectory, "cmd.exe");
+            Process.Start(new ProcessStartInfo(cmd, $"/c timeout /t 3 /nobreak >nul & rmdir /s /q \"{InstallDir}\"")
             {
                 CreateNoWindow = true,
                 UseShellExecute = false,
@@ -103,7 +105,6 @@ internal static class ServiceInstaller
     {
         try
         {
-            if (!ServiceExists()) return "미설치";
             using var sc = new ServiceController(AgentPaths.ServiceName);
             return sc.Status switch
             {
@@ -114,17 +115,29 @@ internal static class ServiceInstaller
                 _ => sc.Status.ToString(),
             };
         }
+        catch (InvalidOperationException)
+        {
+            return "미설치";
+        }
         catch (Exception ex)
         {
             return $"확인 불가 ({ex.Message})";
         }
     }
 
-    private static bool ServiceExists() =>
-        ServiceController.GetServices().Any(s =>
+    private static bool ServiceExists()
+    {
+        try
         {
-            using (s) return string.Equals(s.ServiceName, AgentPaths.ServiceName, StringComparison.OrdinalIgnoreCase);
-        });
+            using var sc = new ServiceController(AgentPaths.ServiceName);
+            _ = sc.Status; // 서비스가 없으면 InvalidOperationException
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
 
     private static void StopService()
     {
@@ -149,13 +162,15 @@ internal static class ServiceInstaller
         return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
     }
 
-    private static void Run(string file, params string[] args)
+    private static int Run(string file, params string[] args)
     {
-        var psi = new ProcessStartInfo(file) { UseShellExecute = false };
+        // 항상 System32 의 도구를 실행(현재 폴더의 같은 이름 exe 가 실행되지 않도록)
+        var psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, file)) { UseShellExecute = false };
         foreach (var a in args) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi) ?? throw new InvalidOperationException($"{file} 실행 실패");
         p.WaitForExit();
         if (p.ExitCode != 0) Console.Error.WriteLine($"  ({file} {args.FirstOrDefault()} 종료 코드 {p.ExitCode})");
+        return p.ExitCode;
     }
 
     private static int Fail(string message)

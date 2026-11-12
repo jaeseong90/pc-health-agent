@@ -9,8 +9,8 @@ namespace PcAgent.Analysis;
 /// </summary>
 public static class UpgradeAdvisor
 {
-    public const double MinObservedHours = 8;        // 성능 기반 판정에 필요한 최소 관측 시간
-    private const double MinWorkHoursForBasis = 4;   // 업무시간 데이터가 이보다 적으면 전체 시간 기준
+    /// <summary>성능 기반 판정에 필요한 최소 관측 시간. 업무시간 데이터가 이보다 적으면 전체 시간 기준으로 판정.</summary>
+    public const double MinObservedHours = 8;
     private const double MemPressureHighPct = 5;
     private const double MemPressureWatchPct = 2;
     private const double CpuHighPct = 10;
@@ -18,6 +18,7 @@ public static class UpgradeAdvisor
     private const double DiskBusyHddPct = 3;
     private const double DiskBusySsdPct = 10;
     private const double ReplaceAgeYears = 5;
+    private const int MinSnapshotEventsForDominance = 3;
 
     public static AnalysisResult Analyze(AnalysisInput input)
     {
@@ -27,6 +28,7 @@ public static class UpgradeAdvisor
         var r = new AnalysisResult();
 
         DateTimeOffset Local(DateTimeOffset utc) => TimeZoneInfo.ConvertTime(utc, tz);
+        DateOnly LocalDate(DateTimeOffset utc) => DateOnly.FromDateTime(Local(utc).DateTime);
         bool IsWork(DateTimeOffset utc)
         {
             var l = Local(utc);
@@ -37,19 +39,19 @@ public static class UpgradeAdvisor
         // ---------- 지표 ----------
         var all = input.Metrics;
         var work = all.Where(m => IsWork(m.MinuteUtc)).ToList();
-        double allHours = Hours(all);
-        double workHours = Hours(work);
-        bool useWork = workHours >= MinWorkHoursForBasis;
+        // 업무시간 데이터가 판정에 충분할 때만 업무시간 기준. 아니면 전체 시간 기준
+        // (업무시간 데이터가 늘어날수록 판정이 불리해지는 역전이 없도록 같은 기준값 사용)
+        bool useWork = Hours(work) >= MinObservedHours;
         var basis = useWork ? (IReadOnlyList<MetricMinute>)work : all;
         string basisLabel = useWork ? "업무시간" : "전체 시간";
         r.Basis = useWork ? $"업무시간 기준 ({(c.WorkdaysOnly ? "평일 " : "")}{c.WorkStartHour}~{c.WorkEndHour}시)" : "전체 시간 기준";
 
         var st = r.Stats;
-        st.ObservedHours = Math.Round(allHours, 1);
+        st.ObservedHours = Math.Round(Hours(all), 1);
         st.BasisHours = Math.Round(Hours(basis), 1);
         if (basis.Count > 0)
         {
-            double covered = basis.Sum(m => (double)m.CoveredSeconds);
+            double covered = Math.Max(1, basis.Sum(m => (double)m.CoveredSeconds));
             st.CpuAvg = Round(Weighted(basis, m => m.CpuAvg));
             st.CpuP95 = Round(Percentile(basis.Select(m => m.CpuAvg), 95));
             st.CpuHighPct = Round(basis.Sum(m => (double)m.CpuHighSeconds) * 100 / covered);
@@ -75,22 +77,24 @@ public static class UpgradeAdvisor
         r.SufficientData = sufficient;
 
         // ---------- 일별 추이 / 원인 프로세스 / 안정성 ----------
+        var eventsPerDay = input.Events.GroupBy(e => LocalDate(e.StartedUtc)).ToDictionary(g => g.Key, g => g.Count());
         r.Daily = all
-            .GroupBy(m => DateOnly.FromDateTime(Local(m.MinuteUtc).DateTime))
+            .GroupBy(m => LocalDate(m.MinuteUtc))
             .OrderBy(g => g.Key)
             .Select(g =>
             {
-                double covered = Math.Max(1, g.Sum(m => (double)m.CoveredSeconds));
+                var day = g.ToList();
+                double covered = Math.Max(1, day.Sum(m => (double)m.CoveredSeconds));
                 return new DailyStat
                 {
                     Date = g.Key.ToString("yyyy-MM-dd"),
                     Weekday = "일월화수목금토"[(int)g.Key.DayOfWeek].ToString(),
-                    ObservedHours = Math.Round(Hours(g.ToList()), 1),
-                    CpuAvg = Round(Weighted(g.ToList(), m => m.CpuAvg)),
-                    CpuHighPct = Round(g.Sum(m => (double)m.CpuHighSeconds) * 100 / covered),
-                    MemPressurePct = Round(g.Sum(m => (double)m.MemPressureSeconds) * 100 / covered),
-                    DiskBusyPct = Round(g.Sum(m => (double)m.DiskBusySeconds) * 100 / covered),
-                    Events = input.Events.Count(e => DateOnly.FromDateTime(Local(e.StartedUtc).DateTime) == g.Key),
+                    ObservedHours = Math.Round(Hours(day), 1),
+                    CpuAvg = Round(Weighted(day, m => m.CpuAvg)),
+                    CpuHighPct = Round(day.Sum(m => (double)m.CpuHighSeconds) * 100 / covered),
+                    MemPressurePct = Round(day.Sum(m => (double)m.MemPressureSeconds) * 100 / covered),
+                    DiskBusyPct = Round(day.Sum(m => (double)m.DiskBusySeconds) * 100 / covered),
+                    Events = eventsPerDay.GetValueOrDefault(g.Key),
                 };
             })
             .ToList();
@@ -103,9 +107,11 @@ public static class UpgradeAdvisor
 
         // ---------- 규칙 ----------
         var recs = r.Recommendations;
-        void Add(string code, string priority, string title, string detail)
+        // 같은 키의 권고는 하나로 합침(예: 여러 이유의 PC 교체). 프로그램 점검은 프로그램·자원별로 따로 둠
+        void Add(string code, string priority, string title, string detail, string? key = null)
         {
-            var existing = recs.FirstOrDefault(x => x.Code == code);
+            key ??= code;
+            var existing = recs.FirstOrDefault(x => (x.Code == "SOFTWARE_REVIEW" ? x.Code + x.Title : x.Code) == key);
             if (existing is null)
             {
                 recs.Add(new Recommendation { Code = code, Priority = priority, Title = title, Detail = detail });
@@ -120,26 +126,36 @@ public static class UpgradeAdvisor
             r.Findings.Add($"관측 데이터가 {st.BasisHours:0.#}시간으로 부족해 성능 기반 판정은 생략했습니다(최소 {MinObservedHours:0}시간). 사양 기반 항목만 판정했습니다.");
         }
 
-        // 1) Windows 11
-        switch (r.Win11.Status)
+        // 1) Windows 11 (LTSC/IoT 는 별도 지원 주기라 강제 전환 대상 아님)
+        if (!inv.IsWindows11 && Win11Check.IsLtsc(inv.OsEdition))
         {
-            case "NotReady":
-                Add("PC_REPLACE", "High", "PC 교체",
-                    $"Windows 10 지원이 2025-10-14 종료됐고, 이 PC 는 Windows 11 요구사항을 충족하지 못합니다: {string.Join(", ", r.Win11.Issues)}.");
-                break;
-            case "Ready":
-                Add("OS_UPGRADE", "Medium", "Windows 11 업그레이드",
-                    "하드웨어는 Windows 11 요구사항을 충족합니다. Windows 10 지원 종료로 OS 업그레이드가 필요합니다.");
-                break;
-            case "Unknown":
-                Add("WIN11_CHECK", "Medium", "Windows 11 호환성 확인",
-                    $"자동 판별하지 못한 항목이 있습니다: {string.Join(", ", r.Win11.Issues)}. 'PC 상태 검사' 앱으로 확인하세요.");
-                break;
+            r.Findings.Add($"Windows 10 LTSC/IoT 에디션({inv.OsEdition})은 일반판과 지원 주기가 달라 Windows 11 전환을 강제하지 않았습니다(호환성: {r.Win11.Status}).");
+        }
+        else
+        {
+            switch (r.Win11.Status)
+            {
+                case "NotReady":
+                    Add("PC_REPLACE", "High", "PC 교체",
+                        $"Windows 10 지원이 2025-10-14 종료됐고, 이 PC 는 Windows 11 하드웨어 요구사항을 충족하지 못합니다: {string.Join(", ", r.Win11.Issues)}.");
+                    break;
+                case "NeedsConfig":
+                    Add("OS_UPGRADE", "Medium", "Windows 11 업그레이드 (설정 변경 필요)",
+                        $"하드웨어는 요구사항을 충족할 가능성이 높지만 펌웨어 설정 변경이 먼저 필요합니다: {string.Join(", ", r.Win11.Issues)}.");
+                    break;
+                case "Ready":
+                    Add("OS_UPGRADE", "Medium", "Windows 11 업그레이드",
+                        "하드웨어는 Windows 11 요구사항을 충족합니다. Windows 10 지원 종료로 OS 업그레이드가 필요합니다.");
+                    break;
+                case "Unknown":
+                    Add("WIN11_CHECK", "Medium", "Windows 11 호환성 확인",
+                        $"자동 판별하지 못한 항목이 있습니다: {string.Join(", ", r.Win11.Issues)}. 'PC 상태 검사' 앱으로 확인하세요.");
+                    break;
+            }
         }
 
         // 2) 메모리
         double ramGb = inv.RamInstalledMb / 1024.0;
-        string slotNote = SlotNote(inv);
         string? ramShortage = null;
         if (ramGb is > 0 and <= 4.5)
         {
@@ -160,7 +176,7 @@ public static class UpgradeAdvisor
         }
         else if (ramShortage is not null)
         {
-            Add("RAM_UPGRADE", "High", "메모리 증설", $"{ramShortage}. 현재 {ramGb:0.#}GB → {TargetRam(ramGb)}GB 권장.{slotNote}");
+            Add("RAM_UPGRADE", "High", "메모리 증설", $"{ramShortage}. 현재 {ramGb:0.#}GB → {TargetRam(ramGb)}GB 권장.{SlotNote(inv)}");
         }
         else if (sufficient && st.MemPressurePct >= MemPressureWatchPct)
         {
@@ -168,11 +184,14 @@ public static class UpgradeAdvisor
                 $"{basisLabel}의 {st.MemPressurePct:0.#}%에서 메모리 부족이 관측됐습니다. 추세를 지켜보고 증가 시 {TargetRam(ramGb)}GB 증설을 검토하세요.");
         }
 
+        // 한 프로그램이 원인인지: 프로세스 스냅샷이 있는 이벤트만 분모로 사용(빈도 제한으로 생략된 이벤트 제외)
+        int memSnapshots = SnapshotEvents(input.Events, PressureKind.Memory);
         var memTop = r.MemoryOffenders.FirstOrDefault();
-        if (memTop is not null && st.MemoryEvents >= 3 && memTop.Rank1 >= 0.6 * st.MemoryEvents)
+        if (memTop is not null && memSnapshots >= MinSnapshotEventsForDominance && memTop.Rank1 >= 0.6 * memSnapshots)
         {
             Add("SOFTWARE_REVIEW", "Medium", $"프로그램 점검: {memTop.Name}",
-                $"메모리 부족 {st.MemoryEvents}건 중 {memTop.Rank1}건에서 '{memTop.Name}' 이(가) 메모리 사용 1위(평균 {memTop.AvgPrivateMb:0}MB). 증설 전에 해당 프로그램의 과다 사용·누수 여부를 확인하세요.");
+                $"프로세스 기록이 있는 메모리 부족 {memSnapshots}건 중 {memTop.Rank1}건에서 '{memTop.Name}' 이(가) 메모리 사용 1위(평균 {memTop.AvgPrivateMb:0}MB). 증설 전에 해당 프로그램의 과다 사용·누수 여부를 확인하세요.",
+                key: "SOFTWARE_REVIEW" + $"프로그램 점검: {memTop.Name}");
         }
 
         // 3) 디스크
@@ -198,8 +217,9 @@ public static class UpgradeAdvisor
         // 4) CPU
         var cpuSupport = Win11Check.EvaluateCpu(inv.CpuName);
         bool old = inv.EstimatedAgeYears >= ReplaceAgeYears;
+        int cpuSnapshots = SnapshotEvents(input.Events, PressureKind.Cpu);
         var cpuTop = r.CpuOffenders.FirstOrDefault();
-        bool cpuDominated = cpuTop is not null && st.CpuEvents >= 3 && cpuTop.Rank1 >= 0.5 * st.CpuEvents;
+        bool cpuDominated = cpuTop is not null && cpuSnapshots >= MinSnapshotEventsForDominance && cpuTop.Rank1 >= 0.5 * cpuSnapshots;
         if (sufficient && st.CpuHighPct >= CpuHighPct)
         {
             var reasons = new List<string>();
@@ -222,7 +242,8 @@ public static class UpgradeAdvisor
         if (cpuDominated && sufficient && st.CpuHighPct >= CpuWatchPct)
         {
             Add("SOFTWARE_REVIEW", "Medium", $"프로그램 점검: {cpuTop!.Name}",
-                $"CPU 포화 {st.CpuEvents}건 중 {cpuTop.Rank1}건에서 '{cpuTop.Name}' 이(가) CPU 사용 1위(평균 {cpuTop.AvgCpu:0.#}%).");
+                $"프로세스 기록이 있는 CPU 포화 {cpuSnapshots}건 중 {cpuTop.Rank1}건에서 '{cpuTop.Name}' 이(가) CPU 사용 1위(평균 {cpuTop.AvgCpu:0.#}%).",
+                key: "SOFTWARE_REVIEW" + $"프로그램 점검: {cpuTop.Name}");
         }
 
         // 5) 안정성
@@ -251,19 +272,16 @@ public static class UpgradeAdvisor
         return r;
     }
 
+    private static int SnapshotEvents(IEnumerable<PressureRecord> events, PressureKind kind) =>
+        events.Count(e => e.Kind == kind && e.Processes is { Count: > 0 });
+
     private static List<Offender> Offenders(IEnumerable<PressureRecord> events, PressureKind kind)
     {
         var map = new Dictionary<string, (Offender O, double Cpu, double Mem, double Io)>(StringComparer.OrdinalIgnoreCase);
         foreach (var e in events)
         {
-            if (e.Kind != kind || e.Processes is not { Count: > 0 } processes) continue;
-            var ranked = (kind switch
-            {
-                PressureKind.Memory => processes.OrderByDescending(p => p.PrivateBytes),
-                PressureKind.Disk => processes.OrderByDescending(p => p.IoBytesPerSec),
-                _ => processes.OrderByDescending(p => p.CpuPercent),
-            }).Take(5).ToList();
-
+            if (e.Kind != kind || e.Processes is not { Count: > 0 }) continue;
+            var ranked = e.RankedProcesses().Take(5).ToList();
             for (int i = 0; i < ranked.Count; i++)
             {
                 var p = ranked[i];

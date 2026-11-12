@@ -5,11 +5,21 @@ public sealed record AgentPaths(string Root, string DataDir, string ConfigFile, 
 {
     public const string ServiceName = "PcAgent";
 
-    public static AgentPaths Resolve(string? rootOverride)
+    /// <summary>CLI 용: --data-dir → PCAGENT_HOME 환경 변수 → 기본 경로 순.</summary>
+    public static AgentPaths Resolve(string? rootOverride) =>
+        Create(rootOverride ?? Environment.GetEnvironmentVariable("PCAGENT_HOME") ?? DefaultRoot);
+
+    /// <summary>서비스·설치·제거용: 항상 기본 경로(%ProgramData%\PcAgent). 덮어쓰기 옵션을 받지 않음.</summary>
+    public static AgentPaths Default() => Create(DefaultRoot);
+
+    public static bool HasOverride(string? rootOverride) =>
+        rootOverride is not null || Environment.GetEnvironmentVariable("PCAGENT_HOME") is not null;
+
+    private static string DefaultRoot =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "PcAgent");
+
+    private static AgentPaths Create(string root)
     {
-        var root = rootOverride
-            ?? Environment.GetEnvironmentVariable("PCAGENT_HOME")
-            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "PcAgent");
         root = Path.GetFullPath(root);
         return new AgentPaths(
             root,

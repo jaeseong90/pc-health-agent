@@ -23,16 +23,18 @@ $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 $project = Join-Path $PSScriptRoot 'src\PcAgent\PcAgent.csproj'
 $out = Join-Path $PSScriptRoot "artifacts\$Runtime"
 
-function Test-CppToolchain {
+function Test-CppToolchain([string]$rid) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
     if (-not (Test-Path $vswhere)) { return $false }
-    $found = & $vswhere -products * -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    # 대상 아키텍처의 링커가 있어야 AOT 빌드 가능
+    $component = if ($rid -eq 'win-arm64') { 'Microsoft.VisualStudio.Component.VC.Tools.ARM64' } else { 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' }
+    $found = & $vswhere -products * -latest -requires $component -property installationPath
     return [bool]$found
 }
 
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 
-$useAot = -not $NoAot -and (Test-CppToolchain)
+$useAot = -not $NoAot -and (Test-CppToolchain $Runtime)
 if ($useAot) {
     Write-Host "Native AOT 로 빌드합니다 ($Runtime)..." -ForegroundColor Cyan
     dotnet publish $project -c Release -r $Runtime -o $out -nologo -p:DebugType=none

@@ -1,11 +1,11 @@
 using PcAgent.Collection;
-using PcAgent.Privacy;
 using PcAgent.Storage;
 
 namespace PcAgent.Hosting;
 
 /// <summary>
 /// 에이전트 메인 루프. 타이머 1개로 동작하며 네트워크 통신은 전혀 하지 않습니다.
+/// 데이터 폴더는 호출 측이 미리 준비합니다(서비스: SecureDirectory, 콘솔: Cli).
 /// </summary>
 internal sealed class AgentRunner(AgentPaths paths)
 {
@@ -14,7 +14,6 @@ internal sealed class AgentRunner(AgentPaths paths)
 
     public async Task RunAsync(CancellationToken ct)
     {
-        Directory.CreateDirectory(paths.DataDir);
         LowFootprint.Apply();
 
         var config = AgentConfig.Load(paths.ConfigFile, Log.Warn);
@@ -24,7 +23,7 @@ internal sealed class AgentRunner(AgentPaths paths)
         Log.Info($"시작 v{AppInfo.Version} · 측정 주기 {config.SampleIntervalSeconds}초 · 데이터 {paths.DataDir}");
 
         using var reader = new SystemMetricsReader();
-        var pipeline = CreatePipeline(config, store);
+        var pipeline = new SamplingPipeline(config, store);
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(config.SampleIntervalSeconds));
         var nextMaintenance = DateTimeOffset.UtcNow + MaintenanceInterval;
         var nextCleanup = DateTimeOffset.UtcNow + CleanupInterval;
@@ -37,6 +36,27 @@ internal sealed class AgentRunner(AgentPaths paths)
                 try
                 {
                     await pipeline.ProcessAsync(reader.Read(), ct);
+
+                    var now = DateTimeOffset.UtcNow;
+                    if (now < nextMaintenance) continue;
+                    nextMaintenance = now + MaintenanceInterval;
+
+                    // 설정 파일이 바뀌면 다시 읽음 (서비스 재시작 불필요, 진행 중 상태 유지)
+                    var stamp = Stamp(paths.ConfigFile);
+                    if (stamp != configStamp)
+                    {
+                        configStamp = stamp;
+                        config = AgentConfig.Load(paths.ConfigFile, Log.Warn);
+                        pipeline.Reconfigure(config);
+                        timer.Period = TimeSpan.FromSeconds(config.SampleIntervalSeconds);
+                        Log.Info("설정 변경을 적용했습니다.");
+                    }
+
+                    if (now >= nextCleanup)
+                    {
+                        nextCleanup = now + CleanupInterval;
+                        Cleanup(store, config);
+                    }
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -44,29 +64,8 @@ internal sealed class AgentRunner(AgentPaths paths)
                 }
                 catch (Exception ex)
                 {
+                    // 한 번의 실패로 수집 전체가 멈추지 않도록 루프 안에서 처리
                     errors.Report(ex);
-                }
-
-                var now = DateTimeOffset.UtcNow;
-                if (now < nextMaintenance) continue;
-                nextMaintenance = now + MaintenanceInterval;
-
-                // 설정 파일이 바뀌면 다시 읽음 (서비스 재시작 불필요)
-                var stamp = Stamp(paths.ConfigFile);
-                if (stamp != configStamp)
-                {
-                    configStamp = stamp;
-                    pipeline.Shutdown();
-                    config = AgentConfig.Load(paths.ConfigFile, Log.Warn);
-                    pipeline = CreatePipeline(config, store);
-                    timer.Period = TimeSpan.FromSeconds(config.SampleIntervalSeconds);
-                    Log.Info("설정 변경을 적용했습니다.");
-                }
-
-                if (now >= nextCleanup)
-                {
-                    nextCleanup = now + CleanupInterval;
-                    Cleanup(store, config);
                 }
             }
         }
@@ -88,9 +87,6 @@ internal sealed class AgentRunner(AgentPaths paths)
         }
     }
 
-    private static SamplingPipeline CreatePipeline(AgentConfig config, DataStore store) =>
-        new(config, store, new ProcessSnapshotter(ProcessMasker.FromConfig(config)));
-
     private static void Cleanup(DataStore store, AgentConfig config)
     {
         try
@@ -103,7 +99,17 @@ internal sealed class AgentRunner(AgentPaths paths)
         }
     }
 
-    private static DateTime Stamp(string path) => File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue;
+    private static DateTime Stamp(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue;
+        }
+        catch
+        {
+            return DateTime.MinValue;
+        }
+    }
 
     /// <summary>같은 오류가 반복되면 10분에 한 번만 기록합니다.</summary>
     private sealed class ErrorThrottle

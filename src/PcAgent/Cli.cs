@@ -21,23 +21,36 @@ internal static class Cli
           PcAgent.exe merge <폴더> [--out 파일.csv]
                                               여러 PC 의 내보내기 zip 을 하나의 요약 CSV 로 합치기
           PcAgent.exe inventory               하드웨어 사양 확인(JSON)
-          PcAgent.exe run                     서비스 없이 콘솔에서 수집 실행(테스트용, Ctrl+C 종료)
+          PcAgent.exe run --data-dir <폴더>   서비스 없이 콘솔에서 수집 실행(테스트용, Ctrl+C 종료)
 
-        공통 옵션:
-          --data-dir <폴더>                   데이터 폴더 지정 (기본: %ProgramData%\PcAgent)
+        옵션:
+          --data-dir <폴더>                   읽을 데이터 폴더 지정 (기본: %ProgramData%\PcAgent)
+                                              install/uninstall 에는 사용할 수 없음
         """;
 
     public static async Task<int> RunAsync(string[] args)
     {
         var a = ParsedArgs.Parse(args);
-        var paths = AgentPaths.Resolve(a.Get("data-dir"));
+        var dataDirOverride = a.Get("data-dir");
+        var paths = AgentPaths.Resolve(dataDirOverride);
 
         if (a.Has("service"))
         {
-            Log.Init(paths.LogFile, console: false);
-            AppDomain.CurrentDomain.UnhandledException += (_, e) => Log.Error("처리되지 않은 예외", e.ExceptionObject as Exception);
-            ServiceBase.Run(new AgentWindowsService(paths));
+            // 서비스는 항상 기본 경로. 폴더 검증 전에는 파일 로그를 쓰지 않음(AgentWindowsService.OnStart 에서 Init)
+            Log.Init(null, console: false);
+            AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            {
+                Log.Error("처리되지 않은 예외", e.ExceptionObject as Exception);
+                WindowsEventLog.Error($"PcAgent 처리되지 않은 예외: {e.ExceptionObject}");
+            };
+            ServiceBase.Run(new AgentWindowsService(AgentPaths.Default()));
             return 0;
+        }
+
+        if (a.Command is "install" or "uninstall" && dataDirOverride is not null)
+        {
+            Console.Error.WriteLine("install/uninstall 에는 --data-dir 을 쓸 수 없습니다. 서비스는 항상 %ProgramData%\\PcAgent 를 사용합니다.");
+            return 1;
         }
 
         Console.OutputEncoding = Encoding.UTF8;
@@ -46,6 +59,12 @@ internal static class Cli
             switch (a.Command)
             {
                 case "run":
+                    if (!AgentPaths.HasOverride(dataDirOverride))
+                    {
+                        // 기본 경로를 일반 사용자 권한으로 만들면 서비스가 신뢰할 수 없는 폴더가 되므로 테스트 폴더를 명시하게 함
+                        Console.Error.WriteLine("run 은 테스트용입니다. --data-dir <폴더> 로 데이터 폴더를 지정하세요. (서비스 데이터 폴더와 분리)");
+                        return 1;
+                    }
                     return await RunConsoleAsync(paths);
                 case "export":
                     return Export(paths, a);
@@ -60,9 +79,9 @@ internal static class Cli
                     foreach (var w in warnings) Console.Error.WriteLine($"경고: {w}");
                     return 0;
                 case "install":
-                    return ServiceInstaller.Install(paths);
+                    return ServiceInstaller.Install(AgentPaths.Default());
                 case "uninstall":
-                    return ServiceInstaller.Uninstall(paths, a.Has("purge"));
+                    return ServiceInstaller.Uninstall(AgentPaths.Default(), a.Has("purge"));
                 default:
                     Console.WriteLine(Usage);
                     return a.Command is null or "help" ? 0 : 1;
@@ -124,6 +143,12 @@ internal static class Cli
         Console.WriteLine($"PC Health Agent v{AppInfo.Version}");
         Console.WriteLine($"서비스      : {ServiceInstaller.GetServiceStatus()}");
         Console.WriteLine($"데이터 폴더 : {paths.Root}");
+        if (Directory.Exists(paths.Root))
+        {
+            bool secure = SecureDirectory.IsTrusted(paths.Root, out var reason)
+                          && (!Directory.Exists(paths.DataDir) || SecureDirectory.IsTrusted(paths.DataDir, out reason));
+            Console.WriteLine(secure ? "폴더 보안  : 정상" : $"폴더 보안  : 주의 — {reason} (서비스용 폴더라면 관리자 권한으로 install 재실행)");
+        }
         Console.WriteLine(files == 0
             ? "수집 데이터 : 없음"
             : $"수집 데이터 : 파일 {files}개, {bytes / 1024.0:0.#}KB, {oldest:yyyy-MM-dd} ~ {newest:yyyy-MM-dd} (UTC)");

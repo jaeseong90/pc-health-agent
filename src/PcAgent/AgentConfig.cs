@@ -79,14 +79,17 @@ public sealed class AgentConfig
         RetentionDays = Math.Clamp(RetentionDays, 7, 730);
         MaxDataSizeMb = Math.Clamp(MaxDataSizeMb, 10, 4096);
 
-        CpuHighPercent = Math.Clamp(CpuHighPercent, 1, 100);
-        if (CpuRecoverPercent >= CpuHighPercent) CpuRecoverPercent = Math.Max(0, CpuHighPercent - 5);
-        MemoryAvailableLowPercent = Math.Clamp(MemoryAvailableLowPercent, 0, 99);
-        if (MemoryAvailableRecoverPercent <= MemoryAvailableLowPercent) MemoryAvailableRecoverPercent = MemoryAvailableLowPercent + 5;
-        CommitHighPercent = Math.Clamp(CommitHighPercent, 1, 100);
-        if (CommitRecoverPercent >= CommitHighPercent) CommitRecoverPercent = Math.Max(0, CommitHighPercent - 5);
-        DiskActiveHighPercent = Math.Clamp(DiskActiveHighPercent, 1, 100);
-        if (DiskActiveRecoverPercent >= DiskActiveHighPercent) DiskActiveRecoverPercent = Math.Max(0, DiskActiveHighPercent - 10);
+        // 해제 기준이 도달 불가능한 값(음수, 100 초과)이면 이벤트가 영원히 끝나지 않으므로 범위를 강제
+        CpuHighPercent = Math.Clamp(CpuHighPercent, 5, 100);
+        CpuRecoverPercent = CpuRecoverPercent >= CpuHighPercent ? CpuHighPercent - 5 : Math.Clamp(CpuRecoverPercent, 0, CpuHighPercent - 1);
+        MemoryAvailableLowPercent = Math.Clamp(MemoryAvailableLowPercent, 0, 90);
+        MemoryAvailableRecoverPercent = MemoryAvailableRecoverPercent <= MemoryAvailableLowPercent
+            ? MemoryAvailableLowPercent + 5
+            : Math.Clamp(MemoryAvailableRecoverPercent, MemoryAvailableLowPercent + 1, 100);
+        CommitHighPercent = Math.Clamp(CommitHighPercent, 5, 100);
+        CommitRecoverPercent = CommitRecoverPercent >= CommitHighPercent ? CommitHighPercent - 5 : Math.Clamp(CommitRecoverPercent, 0, CommitHighPercent - 1);
+        DiskActiveHighPercent = Math.Clamp(DiskActiveHighPercent, 10, 100);
+        DiskActiveRecoverPercent = DiskActiveRecoverPercent >= DiskActiveHighPercent ? DiskActiveHighPercent - 10 : Math.Clamp(DiskActiveRecoverPercent, 0, DiskActiveHighPercent - 1);
 
         CpuSustainSeconds = Math.Clamp(CpuSustainSeconds, 5, 3600);
         MemorySustainSeconds = Math.Clamp(MemorySustainSeconds, 5, 3600);
