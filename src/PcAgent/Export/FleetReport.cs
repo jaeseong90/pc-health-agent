@@ -1,4 +1,5 @@
 using PcAgent.Analysis;
+using PcAgent.Inventory;
 using static PcAgent.Export.HtmlReport;
 
 namespace PcAgent.Export;
@@ -18,6 +19,8 @@ internal static class FleetReport
         "RAM_UPGRADE" => "메모리 증설",
         "SSD_REPLACE" => "SSD 교체",
         "BATTERY_REPLACE" => "배터리 교체",
+        "DISK_REPLACE" => "디스크 교체",
+        "DISK_CHECK" => "디스크 점검",
         "OS_UPGRADE" => "Windows 11 업그레이드",
         "WIN11_CHECK" => "Windows 11 호환성 확인",
         "DISK_CLEANUP" => "디스크 공간 확보",
@@ -88,7 +91,8 @@ internal static class FleetReport
                     $"<td class=\"recs\">{recs}</td>" +
                     $"<td>{H(inv.CpuName)}</td>" +
                     $"<td class=\"n\">{inv.RamInstalledMb / 1024.0:0.#}GB{(inv.RamSlotsLabel is { } slots ? $"<div class=\"muted\">{H(slots)}</div>" : "")}</td>" +
-                    $"<td class=\"nw\">{(disk is null ? "-" : H($"{disk.MediaType} {disk.SizeGb:0}GB"))}</td>" +
+                    $"<td class=\"nw\">{(disk is null ? "-" : H($"{disk.MediaType} {disk.SizeGb:0}GB"))}" +
+                    $"{(disk?.Health is { } dh ? $"<div class=\"muted\">{H(DiskHealth.LevelLabel(dh.Level))}{(dh.PercentageUsed is { } pu ? $" · 수명 {pu}%" : "")}</div>" : "")}</td>" +
                     $"<td class=\"n\">{(inv.EstimatedAgeYears is { } age ? $"{age:0.#}년" : "-")}</td>" +
                     $"<td class=\"nw\">{H(Exporter.Win11Label(a.Win11.Status))}</td>" +
                     $"<td class=\"n\">{a.Stats.MemPressurePct:0.#}%</td>" +

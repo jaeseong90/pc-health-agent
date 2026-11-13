@@ -45,15 +45,19 @@ internal static unsafe class EventLogCollector
             ("Application Hang", 1002) => "AppHang",
             _ => null,
         }),
-        new("Microsoft-Windows-Diagnostics-Performance/Operational", [100], (_, id) => id == 100 ? "Boot" : null),
+        new(BootChannel, [100], (_, id) => id == 100 ? "Boot" : null),
     ];
 
-    public static List<EventLogItem> Collect(DateTimeOffset fromUtc, ProcessMasker masker, List<string> warnings)
+    /// <summary>부팅 시간 로그 채널(관리자 권한 필요 — 서비스가 주기적으로 기록해 둠).</summary>
+    internal const string BootChannel = "Microsoft-Windows-Diagnostics-Performance/Operational";
+
+    public static List<EventLogItem> Collect(DateTimeOffset fromUtc, ProcessMasker masker, List<string> warnings, bool bootOnly = false)
     {
         var items = new List<EventLogItem>();
         long ms = Math.Max(1, (long)(DateTimeOffset.UtcNow - fromUtc).TotalMilliseconds);
         foreach (var source in Sources)
         {
+            if (bootOnly && source.Channel != BootChannel) continue;
             var ids = string.Join(" or ", source.EventIds.Select(i => $"EventID={i}"));
             var query = $"*[System[({ids}) and TimeCreated[timediff(@SystemTime) <= {ms}]]]";
             try

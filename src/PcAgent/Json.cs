@@ -24,6 +24,7 @@ namespace PcAgent;
 [JsonSerializable(typeof(InventoryInfo))]
 [JsonSerializable(typeof(ExportSummary))]
 [JsonSerializable(typeof(AgentUsageInfo))]
+[JsonSerializable(typeof(PrivilegedCacheInfo))]
 internal partial class AgentJsonContext : JsonSerializerContext
 {
 }

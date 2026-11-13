@@ -39,6 +39,7 @@ internal static class Exporter
         "OS", "OS빌드", "Win11", "TPM", "BIOS날짜", "추정연식(년)",
         "블루스크린", "비정상종료", "앱크래시", "평균부팅(초)", "메모리부족주원인", "CPU포화주원인",
         "배터리수명(%)", "에이전트버전", "에이전트CPU(%)", "에이전트메모리(MB)",
+        "디스크상태", "SSD수명사용(%)", "디스크사용시간(h)",
     ];
 
     public static string Run(AgentPaths paths, AgentConfig config, int days, string outDir, Action<string> progress)
@@ -63,6 +64,8 @@ internal static class Exporter
 
         progress("이벤트 로그 조회 중...");
         var logs = EventLogCollector.Collect(fromUtc, masker, warnings);
+        // 일반 권한으로 내보내면 못 읽는 부팅 시간·디스크 SMART 는 서비스가 기록해 둔 값으로 채움
+        PrivilegedCache.ApplyTo(PrivilegedCache.Read(paths.Root), inventory, logs, warnings, fromUtc);
 
         progress("분석 중...");
         var analysis = UpgradeAdvisor.Analyze(new AnalysisInput
@@ -185,7 +188,10 @@ internal static class Exporter
             inv.BatteryHealthPercent,
             s.AgentVersion,
             s.AgentUsage?.CpuAvgPercent?.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture),   // 0.00x% 단위라 기본 2자리면 0 으로 보임
-            s.AgentUsage?.PrivateMb);
+            s.AgentUsage?.PrivateMb,
+            sysDisk?.Health is { } dh ? DiskHealth.LevelLabel(dh.Level) : "확인 불가",
+            sysDisk?.Health?.PercentageUsed,
+            sysDisk?.Health?.PowerOnHours);
     }
 
     private static void WriteMetrics(CsvWriter csv, List<MetricMinute> metrics, TimeZoneInfo tz)

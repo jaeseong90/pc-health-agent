@@ -136,6 +136,8 @@ internal static unsafe partial class Native
     internal const uint IOCTL_STORAGE_QUERY_PROPERTY = 0x002D1400;
     internal const uint IOCTL_DISK_GET_DRIVE_GEOMETRY_EX = 0x000700A0;
     internal const uint IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS = 0x00560000;
+    internal const uint IOCTL_STORAGE_PREDICT_FAILURE = 0x002D1100;
+    internal const uint GENERIC_WRITE = 0x40000000;
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct STORAGE_PROPERTY_QUERY

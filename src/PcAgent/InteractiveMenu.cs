@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using PcAgent.Export;
 using PcAgent.Hosting;
+using PcAgent.Storage;
 
 namespace PcAgent;
 
@@ -103,6 +104,16 @@ internal static class InteractiveMenu
             : compare > 0 ? $"설치 v{installedVersion} (이 파일보다 최신)"
             : $"v{installedVersion}";
         Console.WriteLine($" 상태: {ServiceInstaller.GetServiceStatus()} · {version}");
+        try
+        {
+            var paths = AgentPaths.Default();
+            var progress = Cli.Progress(paths, new DataStore(paths.DataDir));
+            if (progress.Days > 0) Console.WriteLine($" {progress.Describe()}");
+        }
+        catch
+        {
+            // 진행 상황은 참고용
+        }
     }
 
     internal const string ConsentText = """

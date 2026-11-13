@@ -1,5 +1,6 @@
 using System.ServiceProcess;
 using System.Text;
+using PcAgent.Analysis;
 using PcAgent.Export;
 using PcAgent.Hosting;
 using PcAgent.Inventory;
@@ -245,6 +246,8 @@ internal static class Cli
         Console.WriteLine(files == 0
             ? "수집 데이터 : 없음"
             : $"수집 데이터 : 파일 {files}개, {bytes / 1024.0:0.#}KB, {oldest:yyyy-MM-dd} ~ {newest:yyyy-MM-dd} (UTC)");
+        if (files > 0)
+            Console.WriteLine($"수집 진행   : {Progress(paths, store).Describe()}");
         if (last is not null)
             Console.WriteLine($"마지막 측정 : {last.MinuteUtc.ToLocalTime():yyyy-MM-dd HH:mm} · CPU {last.CpuAvg}% · 가용 메모리 {last.MemAvailAvg}%");
 
@@ -259,6 +262,14 @@ internal static class Cli
         }
         Console.WriteLine($"설정 파일   : {paths.ConfigFile}{(File.Exists(paths.ConfigFile) ? "" : " (없음 — 기본값 사용)")}");
         return 0;
+    }
+
+    /// <summary>최근 30일(기본 내보내기 기간) 수집 진행 상황.</summary>
+    internal static CollectionProgress Progress(AgentPaths paths, DataStore store)
+    {
+        var config = AgentConfig.Load(paths.ConfigFile, _ => { });
+        var now = DateTimeOffset.UtcNow;
+        return CollectionProgress.Compute(store.ReadMetrics(now.AddDays(-30), now), config, TimeZoneInfo.Local);
     }
 
     internal static string DefaultExportDir(AgentPaths paths)

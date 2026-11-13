@@ -106,6 +106,8 @@ public sealed class DiskDrive
     public double SizeGb { get; set; }
     public bool IsSystem { get; set; }
     public bool IsRemovable { get; set; }
+    /// <summary>SMART 건강 상태. 확인할 수 없으면 null.</summary>
+    public DiskHealth? Health { get; set; }
 }
 
 public sealed class VolumeInfo

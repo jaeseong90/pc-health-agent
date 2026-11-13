@@ -12,6 +12,7 @@ internal sealed class AgentRunner(AgentPaths paths)
     private static readonly TimeSpan MaintenanceInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan CleanupInterval = TimeSpan.FromHours(6);
     private static readonly TimeSpan UsageInterval = TimeSpan.FromHours(1);
+    private static readonly TimeSpan PrivilegedInterval = TimeSpan.FromHours(6);
 
     public async Task RunAsync(CancellationToken ct)
     {
@@ -28,7 +29,8 @@ internal sealed class AgentRunner(AgentPaths paths)
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(config.SampleIntervalSeconds));
         var nextMaintenance = DateTimeOffset.UtcNow + MaintenanceInterval;
         var nextCleanup = DateTimeOffset.UtcNow + CleanupInterval;
-        var nextUsage = DateTimeOffset.UtcNow;   // 첫 유지보수 시점(5분 뒤)에 처음 기록
+        var nextUsage = DateTimeOffset.UtcNow;        // 첫 유지보수 시점(5분 뒤)에 처음 기록
+        var nextPrivileged = DateTimeOffset.UtcNow;   // 부팅 직후 기록되는 부팅 시간 로그를 놓치지 않도록 첫 유지보수 때부터
         var errors = new ErrorThrottle();
 
         try
@@ -65,6 +67,12 @@ internal sealed class AgentRunner(AgentPaths paths)
                         nextUsage = now + UsageInterval;
                         WriteUsage();
                     }
+
+                    if (now >= nextPrivileged)
+                    {
+                        nextPrivileged = now + PrivilegedInterval;
+                        WritePrivileged(config);
+                    }
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -93,6 +101,18 @@ internal sealed class AgentRunner(AgentPaths paths)
             }
             WriteUsage();
             Log.Info("중지");
+        }
+    }
+
+    private void WritePrivileged(AgentConfig config)
+    {
+        try
+        {
+            PrivilegedCache.Write(paths.Root, Privacy.ProcessMasker.FromConfig(config));
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"관리자 전용 정보 기록 실패: {ex.Message}");
         }
     }
 

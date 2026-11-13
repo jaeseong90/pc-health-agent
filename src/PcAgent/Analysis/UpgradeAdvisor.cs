@@ -32,12 +32,7 @@ public static class UpgradeAdvisor
 
         DateTimeOffset Local(DateTimeOffset utc) => TimeZoneInfo.ConvertTime(utc, tz);
         DateOnly LocalDate(DateTimeOffset utc) => DateOnly.FromDateTime(Local(utc).DateTime);
-        bool IsWork(DateTimeOffset utc)
-        {
-            var l = Local(utc);
-            if (c.WorkdaysOnly && l.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) return false;
-            return l.Hour >= c.WorkStartHour && l.Hour < c.WorkEndHour;
-        }
+        bool IsWork(DateTimeOffset utc) => IsWorkTime(Local(utc), c);
 
         // ---------- 지표 ----------
         var all = input.Metrics;
@@ -171,15 +166,24 @@ public static class UpgradeAdvisor
                 : $"Windows 메모리 부족 경고 {r.Stability.LowMemoryWarnings}회";
         }
 
+        // 한 프로그램이 원인인지: 프로세스 스냅샷이 있는 이벤트만 분모로 사용(빈도 제한으로 생략된 이벤트 제외)
+        int memSnapshots = SnapshotEvents(input.Events, PressureKind.Memory);
+        var memTop = r.MemoryOffenders.FirstOrDefault();
+        bool memDominated = sufficient && memTop is not null && memSnapshots >= MinSnapshotEventsForDominance && memTop.Rank1 >= 0.6 * memSnapshots;
+
+        // 부족의 대부분이 한 프로그램 때문이면 하드웨어 조치는 '보통'으로 낮추고 프로그램 점검을 먼저(설치 메모리가 아주 적으면 제외)
+        bool programFirst = memDominated && ramGb > 4.5;
+        string ramPriority = programFirst ? "Medium" : "High";
+        string programNote = programFirst ? $" 다만 메모리 부족의 대부분이 '{memTop!.Name}' 사용 중에 생겨, 이 프로그램을 먼저 점검한 뒤 결정하세요." : "";
         if (ramShortage is not null && inv.RamSoldered)
         {
             // 온보드 메모리는 증설이 불가하므로 사실상 교체 대상
-            Add("PC_REPLACE", "High", "PC 교체 (메모리 증설 불가)",
-                $"{ramShortage}. 메모리가 온보드(납땜) {ramGb:0.#}GB 로 보여 증설이 불가하므로 {TargetRam(ramGb)}GB 이상 PC 로 교체가 필요합니다.");
+            Add("PC_REPLACE", ramPriority, "PC 교체 (메모리 증설 불가)",
+                $"{ramShortage}. 메모리가 온보드(납땜) {ramGb:0.#}GB 로 보여 증설이 불가하므로 {TargetRam(ramGb)}GB 이상 PC 로 교체가 필요합니다.{programNote}");
         }
         else if (ramShortage is not null)
         {
-            Add("RAM_UPGRADE", "High", "메모리 증설", $"{ramShortage}. 현재 {ramGb:0.#}GB → {TargetRam(ramGb)}GB 권장.{SlotNote(inv)}");
+            Add("RAM_UPGRADE", ramPriority, "메모리 증설", $"{ramShortage}. 현재 {ramGb:0.#}GB → {TargetRam(ramGb)}GB 권장.{SlotNote(inv)}{programNote}");
         }
         else if (sufficient && st.MemPressurePct >= MemPressureWatchPct)
         {
@@ -187,10 +191,7 @@ public static class UpgradeAdvisor
                 $"{basisLabel}의 {st.MemPressurePct:0.#}%에서 메모리 부족이 관측됐습니다. 추세를 지켜보고 증가 시 {TargetRam(ramGb)}GB 증설을 검토하세요.");
         }
 
-        // 한 프로그램이 원인인지: 프로세스 스냅샷이 있는 이벤트만 분모로 사용(빈도 제한으로 생략된 이벤트 제외)
-        int memSnapshots = SnapshotEvents(input.Events, PressureKind.Memory);
-        var memTop = r.MemoryOffenders.FirstOrDefault();
-        if (sufficient && memTop is not null && memSnapshots >= MinSnapshotEventsForDominance && memTop.Rank1 >= 0.6 * memSnapshots)
+        if (memDominated && memTop is not null)
         {
             Add("SOFTWARE_REVIEW", "Medium", $"프로그램 점검: {memTop.Name}",
                 $"프로세스 기록이 있는 메모리 부족 {memSnapshots}건 중 {memTop.Rank1}건에서 '{memTop.Name}' 이(가) 메모리 사용 1위(평균 {memTop.AvgPrivateMb:0}MB). 증설 전에 해당 프로그램의 과다 사용·누수 여부를 확인하세요.",
@@ -208,6 +209,21 @@ public static class UpgradeAdvisor
         else if (sufficient && st.DiskBusyPct >= DiskBusySsdPct)
         {
             r.Findings.Add($"SSD 사용 중이지만 디스크 포화 비율이 {st.DiskBusyPct:0.#}% 입니다. 백신 검사·동기화·인덱싱 프로그램을 확인하세요.");
+        }
+
+        // 디스크 건강(SMART): 고장 위험이면 즉시 백업·교체, 주의면 점검
+        foreach (var d in inv.Disks.Where(d => !d.IsRemovable && d.Health is not null))
+        {
+            var problems = d.Health!.Problems();
+            if (problems.Count == 0) continue;
+            string where = d.IsSystem ? "시스템 디스크" : $"디스크 {d.Number}";
+            string detail = $"{where}({d.Model ?? d.MediaType}): {string.Join(", ", problems)}.";
+            if (d.Health.Level == "Critical" && d.IsSystem && d.MediaType == "HDD")
+                Add("SSD_REPLACE", "High", "SSD 교체", detail + " 데이터를 먼저 백업하세요.");
+            else if (d.Health.Level == "Critical")
+                Add("DISK_REPLACE", "High", "디스크 교체", detail + " 데이터를 즉시 백업하고 교체하세요.");
+            else
+                Add("DISK_CHECK", "Medium", "디스크 점검", detail + " 백업 상태를 확인하고 추이를 지켜보세요.");
         }
 
         var sysVol = inv.Volumes.FirstOrDefault(v => v.IsSystem);
@@ -288,6 +304,13 @@ public static class UpgradeAdvisor
             : sufficient ? ("Ok", "양호")
             : ("InsufficientData", "데이터 부족");
         return r;
+    }
+
+    /// <summary>현지 시각이 설정의 업무시간(기본 평일 9~18시)인지.</summary>
+    internal static bool IsWorkTime(DateTimeOffset local, AgentConfig c)
+    {
+        if (c.WorkdaysOnly && local.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) return false;
+        return local.Hour >= c.WorkStartHour && local.Hour < c.WorkEndHour;
     }
 
     private static int SnapshotEvents(IEnumerable<PressureRecord> events, PressureKind kind) =>

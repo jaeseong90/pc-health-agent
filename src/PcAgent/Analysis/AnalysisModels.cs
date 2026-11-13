@@ -55,7 +55,7 @@ public sealed class UsageStats
 
 public sealed class Recommendation
 {
-    /// <summary>RAM_UPGRADE, SSD_REPLACE, PC_REPLACE, OS_UPGRADE, DISK_CLEANUP, SOFTWARE_REVIEW, CPU_REVIEW, STABILITY_CHECK, WIN11_CHECK, RAM_WATCH, BATTERY_REPLACE</summary>
+    /// <summary>RAM_UPGRADE, SSD_REPLACE, PC_REPLACE, OS_UPGRADE, DISK_CLEANUP, SOFTWARE_REVIEW, CPU_REVIEW, STABILITY_CHECK, WIN11_CHECK, RAM_WATCH, BATTERY_REPLACE, DISK_REPLACE, DISK_CHECK</summary>
     public string Code { get; set; } = "";
     /// <summary>High, Medium, Low</summary>
     public string Priority { get; set; } = "";

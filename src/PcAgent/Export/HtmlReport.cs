@@ -74,6 +74,8 @@ internal static class HtmlReport
                        (!inv.RamSoldered && inv.RamSlotsTotal is { } t ? $" · 슬롯 {inv.RamSlotsUsed}/{t} 사용" : "") + modules);
         Row(w, "디스크", string.Join(" / ", inv.Disks.Where(d => !d.IsRemovable).Select(d =>
             $"{(d.IsSystem ? "[시스템] " : "")}{d.Model} · {d.MediaType} · {d.BusType} · {d.SizeGb:0}GB")));
+        var healthRows = inv.Disks.Where(d => !d.IsRemovable).Select(DiskHealthLabel).Where(x => x is not null).ToList();
+        if (healthRows.Count > 0) Row(w, "디스크 상태", string.Join(" / ", healthRows));
         if (sysVol is not null) Row(w, "시스템 드라이브", $"{sysVol.Name} 여유 {sysVol.FreeGb:0.#}GB / {sysVol.SizeGb:0.#}GB");
         Row(w, "그래픽", string.Join(", ", inv.Gpus));
         if (inv.Batteries.Count > 0) Row(w, "배터리", BatteryLabel(inv));
@@ -153,6 +155,19 @@ internal static class HtmlReport
             ? $" · 에이전트 자체 사용량: 메모리 {u.PrivateMb:0.#}MB" + (u.CpuAvgPercent is { } cpu ? $", CPU 평균 {cpu:0.###}%" : "")
             : "";
         w.Write($"<p>PC Health Agent v{H(s.AgentVersion)} · 생성 {Exporter.Local(s.GeneratedUtc, tz):yyyy-MM-dd HH:mm}{H(usage)}</p></footer></div></body></html>");
+    }
+
+    internal static string? DiskHealthLabel(DiskDrive d)
+    {
+        if (d.Health is not { } h) return null;
+        var parts = new List<string> { DiskHealth.LevelLabel(h.Level) };
+        var problems = h.Problems();
+        if (problems.Count > 0) parts.Add(string.Join(", ", problems));
+        if (h.PercentageUsed is { } used && used < 80) parts.Add($"수명 사용 {used}%");
+        if (h.PowerOnHours is { } poh) parts.Add($"사용 {poh:N0}시간");
+        if (h.TemperatureC is { } t) parts.Add($"{t}°C");
+        if (h.DataWrittenTb is { } tb) parts.Add($"누적 기록 {tb:0.#}TB");
+        return (d.IsSystem ? "[시스템] " : $"[디스크 {d.Number}] ") + string.Join(" · ", parts);
     }
 
     internal static string BatteryLabel(InventoryInfo inv)

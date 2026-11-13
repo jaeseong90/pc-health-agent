@@ -125,6 +125,36 @@ public class UpgradeAdvisorTests
         Assert.Contains(r.Recommendations, x => x.Code == "SOFTWARE_REVIEW" && x.Title.Contains("LeakyApp"));
     }
 
+    [Theory]
+    [InlineData(false, "RAM_UPGRADE")]
+    [InlineData(true, "PC_REPLACE")]    // 온보드 메모리
+    public void Memory_shortage_caused_mostly_by_one_program_checks_the_program_first(bool soldered, string code)
+    {
+        var inv = TestData.Inventory(ramMb: 16384);
+        if (soldered) inv.RamModules[0].FormFactor = "Row of chips";
+        var events = Enumerable.Range(0, 5)
+            .Select(i => TestData.MemoryEvent(TestData.Monday.AddHours(11 + i), ("HeavyTool", 6000), ("chrome", 1500)))
+            .ToList();
+        var r = Analyze(inv, TestData.WorkdayMetrics(5, memPressurePct: 20), events);
+
+        var hw = Assert.Single(r.Recommendations, x => x.Code == code);
+        Assert.Equal("Medium", hw.Priority);                      // 하드웨어 조치는 보통으로
+        Assert.Contains("'HeavyTool'", hw.Detail);
+        Assert.Contains(r.Recommendations, x => x.Code == "SOFTWARE_REVIEW" && x.Title.Contains("HeavyTool"));
+        Assert.Equal("Watch", r.Verdict);                         // 교체·증설 확정 전에 점검
+    }
+
+    [Fact]
+    public void Very_small_ram_stays_high_even_when_one_program_dominates()
+    {
+        var events = Enumerable.Range(0, 5)
+            .Select(i => TestData.MemoryEvent(TestData.Monday.AddHours(11 + i), ("HeavyTool", 2000), ("chrome", 500)))
+            .ToList();
+        var r = Analyze(TestData.Inventory(ramMb: 4096), TestData.WorkdayMetrics(5, memPressurePct: 20), events);
+
+        Assert.Equal("High", r.Recommendations.Single(x => x.Code == "RAM_UPGRADE").Priority);
+    }
+
     [Fact]
     public void Software_review_needs_enough_observation_like_other_performance_rules()
     {

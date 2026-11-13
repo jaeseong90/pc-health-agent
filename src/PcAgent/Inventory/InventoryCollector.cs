@@ -162,8 +162,12 @@ internal static unsafe class InventoryCollector
         if (inv.RamInstalledMb == 0) inv.RamInstalledMb = inv.RamVisibleMb;
     }
 
-    private static void ReadDisks(InventoryInfo inv)
+    private static void ReadDisks(InventoryInfo inv) => inv.Disks.AddRange(EnumerateDisks());
+
+    /// <summary>물리 디스크 목록(사양 + 건강 상태). 서비스의 관리자 전용 정보 기록에서도 사용합니다.</summary>
+    internal static List<DiskDrive> EnumerateDisks()
     {
+        var disks = new List<DiskDrive>();
         int? systemDisk = GetSystemDiskNumber();
         byte* geo = stackalloc byte[256];
         for (int i = 0; i < 32; i++)
@@ -186,8 +190,14 @@ internal static unsafe class InventoryCollector
             if (Native.DeviceIoControl(h, Native.IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, null, 0, geo, 256, out uint ret, 0) && ret >= 32)
                 disk.SizeGb = Math.Round(*(long*)(geo + 24) / GiB, 1);
 
-            inv.Disks.Add(disk);
+            if (!disk.IsRemovable && disk.BusType is not ("USB" or "Virtual" or "FileBackedVirtual" or "Spaces" or "SD" or "MMC"))
+            {
+                try { disk.Health = DiskHealthReader.Read(i, disk.BusType); } catch { /* 건강 정보는 선택 항목 */ }
+            }
+
+            disks.Add(disk);
         }
+        return disks;
     }
 
     private static void QueryDescriptor(SafeFileHandle h, DiskDrive disk)
