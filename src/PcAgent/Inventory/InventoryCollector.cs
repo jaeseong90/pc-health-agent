@@ -33,7 +33,56 @@ internal static unsafe class InventoryCollector
         Try(warnings, "볼륨", () => ReadVolumes(inv));
         Try(warnings, "GPU", () => ReadGpus(inv));
         Try(warnings, "보안(TPM/UEFI)", () => ReadSecurity(inv));
+        Try(warnings, "배터리", () => ReadBatteries(inv));
         return inv;
+    }
+
+    /// <summary>배터리 장치별 설계/완충 용량과 충전 횟수(관리자 권한 불필요). UPS 등 단시간용 배터리는 제외.</summary>
+    private static void ReadBatteries(InventoryInfo inv)
+    {
+        foreach (var path in DeviceInterfaces(Native.GUID_DEVICE_BATTERY))
+        {
+            using var h = Native.CreateFile(path, Native.GENERIC_READ, Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE, 0, Native.OPEN_EXISTING, 0, 0);
+            if (h.IsInvalid) continue;
+
+            uint wait = 0, tag = 0;
+            if (!Native.DeviceIoControl(h, Native.IOCTL_BATTERY_QUERY_TAG, &wait, sizeof(uint), &tag, sizeof(uint), out _, 0) || tag == 0)
+                continue;   // 배터리가 빠져 있음
+
+            var query = new Native.BATTERY_QUERY_INFORMATION { BatteryTag = tag, InformationLevel = 0 };
+            Native.BATTERY_INFORMATION info;
+            if (!Native.DeviceIoControl(h, Native.IOCTL_BATTERY_QUERY_INFORMATION,
+                    &query, (uint)sizeof(Native.BATTERY_QUERY_INFORMATION), &info, (uint)sizeof(Native.BATTERY_INFORMATION), out _, 0))
+                continue;
+            if ((info.Capabilities & Native.BATTERY_SYSTEM_BATTERY) == 0 || (info.Capabilities & Native.BATTERY_IS_SHORT_TERM) != 0)
+                continue;
+
+            inv.Batteries.Add(new BatteryInfo
+            {
+                Chemistry = Encoding.ASCII.GetString(new ReadOnlySpan<byte>(info.Chemistry, 4)).TrimEnd('\0', ' ') is { Length: > 0 } chem ? chem : null,
+                DesignedCapacity = info.DesignedCapacity,
+                FullChargedCapacity = info.FullChargedCapacity,
+                Relative = (info.Capabilities & Native.BATTERY_CAPACITY_RELATIVE) != 0,
+                CycleCount = info.CycleCount > 0 ? (int)info.CycleCount : null,
+            });
+        }
+    }
+
+    /// <summary>장치 인터페이스 경로 목록(CfgMgr32).</summary>
+    private static List<string> DeviceInterfaces(Guid interfaceClass)
+    {
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            if (Native.CM_Get_Device_Interface_List_Size(out uint length, interfaceClass, null, 0) != Native.CR_SUCCESS || length <= 1)
+                return [];
+            var buffer = new char[length];
+            uint cr;
+            fixed (char* p = buffer) cr = Native.CM_Get_Device_Interface_List(interfaceClass, null, p, length, 0);
+            if (cr == Native.CR_BUFFER_SMALL) continue;   // 그 사이 장치가 추가됨
+            if (cr != Native.CR_SUCCESS) return [];
+            return new string(buffer).Split('\0', StringSplitOptions.RemoveEmptyEntries).ToList();
+        }
+        return [];
     }
 
     private static void Try(List<string> warnings, string area, Action action)

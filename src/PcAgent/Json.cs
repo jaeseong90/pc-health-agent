@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 using PcAgent.Collection;
 using PcAgent.Export;
+using PcAgent.Hosting;
 using PcAgent.Inventory;
 
 namespace PcAgent;
@@ -22,6 +23,7 @@ namespace PcAgent;
 [JsonSerializable(typeof(PressureRecord))]
 [JsonSerializable(typeof(InventoryInfo))]
 [JsonSerializable(typeof(ExportSummary))]
+[JsonSerializable(typeof(AgentUsageInfo))]
 internal partial class AgentJsonContext : JsonSerializerContext
 {
 }

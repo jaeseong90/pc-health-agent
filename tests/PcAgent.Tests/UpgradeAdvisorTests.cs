@@ -126,6 +126,22 @@ public class UpgradeAdvisorTests
     }
 
     [Fact]
+    public void Software_review_needs_enough_observation_like_other_performance_rules()
+    {
+        // 관측 6시간(최소 8시간 미만) — "성능 기반 판정 생략" 안내와 모순되는 프로그램 점검 권고가 나오면 안 됨
+        var metrics = TestData.WorkdayMetrics(1).Take(6 * 60).ToList();
+        var events = Enumerable.Range(0, 5)
+            .Select(i => TestData.MemoryEvent(TestData.Monday.AddHours(10).AddMinutes(i * 30), ("LeakyApp", 6000), ("chrome", 1500)))
+            .ToList();
+        var r = Analyze(TestData.Inventory(), metrics, events);
+
+        Assert.False(r.SufficientData);
+        Assert.DoesNotContain(r.Recommendations, x => x.Code == "SOFTWARE_REVIEW");
+        Assert.Equal("LeakyApp", r.MemoryOffenders[0].Name);   // 원인 프로그램 목록은 그대로 보여 줌
+        Assert.Equal("InsufficientData", r.Verdict);
+    }
+
+    [Fact]
     public void Repeated_bugchecks_recommend_stability_check()
     {
         var logs = Enumerable.Range(0, 2)

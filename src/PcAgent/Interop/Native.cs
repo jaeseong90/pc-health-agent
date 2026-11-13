@@ -195,4 +195,109 @@ internal static unsafe partial class Native
     [LibraryImport("wevtapi.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool EvtClose(nint handle);
+
+    // ---------------- 배터리 (CfgMgr32 + 배터리 IOCTL) ----------------
+
+    internal static readonly Guid GUID_DEVICE_BATTERY = new("72631E54-78A4-11D0-BCF7-00AA00B7B32A");
+    internal const uint CR_SUCCESS = 0;
+    internal const uint CR_BUFFER_SMALL = 0x1A;
+    internal const uint GENERIC_READ = 0x80000000;
+    internal const uint IOCTL_BATTERY_QUERY_TAG = 0x00294040;
+    internal const uint IOCTL_BATTERY_QUERY_INFORMATION = 0x00294044;
+    internal const uint BATTERY_SYSTEM_BATTERY = 0x80000000;
+    internal const uint BATTERY_CAPACITY_RELATIVE = 0x40000000;
+    internal const uint BATTERY_IS_SHORT_TERM = 0x20000000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct BATTERY_QUERY_INFORMATION
+    {
+        public uint BatteryTag;
+        public int InformationLevel;   // 0 = BatteryInformation
+        public int AtRate;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct BATTERY_INFORMATION
+    {
+        public uint Capabilities;
+        public byte Technology;
+        public fixed byte Reserved[3];
+        public fixed byte Chemistry[4];
+        public uint DesignedCapacity;      // mWh (BATTERY_CAPACITY_RELATIVE 이면 상대값)
+        public uint FullChargedCapacity;
+        public uint DefaultAlert1;
+        public uint DefaultAlert2;
+        public uint CriticalBias;
+        public uint CycleCount;
+    }
+
+    [LibraryImport("cfgmgr32.dll", EntryPoint = "CM_Get_Device_Interface_List_SizeW")]
+    internal static partial uint CM_Get_Device_Interface_List_Size(out uint length, in Guid interfaceClassGuid, char* deviceId, uint flags);
+
+    [LibraryImport("cfgmgr32.dll", EntryPoint = "CM_Get_Device_Interface_ListW")]
+    internal static partial uint CM_Get_Device_Interface_List(in Guid interfaceClassGuid, char* deviceId, char* buffer, uint bufferLength, uint flags);
+
+    // ---------------- 콘솔 / 프로세스 실행 / 파일 ----------------
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    internal static partial uint GetConsoleProcessList(uint* processList, uint processCount);
+
+    internal const uint SEE_MASK_NOCLOSEPROCESS = 0x00000040;
+    internal const uint SEE_MASK_NOZONECHECKS = 0x00800000;
+    internal const int SW_SHOWNORMAL = 1;
+    internal const int ERROR_CANCELLED = 1223;
+    internal const uint INFINITE = 0xFFFFFFFF;
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct SHELLEXECUTEINFOW
+    {
+        public uint cbSize;
+        public uint fMask;
+        public nint hwnd;
+        public char* lpVerb;
+        public char* lpFile;
+        public char* lpParameters;
+        public char* lpDirectory;
+        public int nShow;
+        public nint hInstApp;
+        public nint lpIDList;
+        public char* lpClass;
+        public nint hkeyClass;
+        public uint dwHotKey;
+        public nint hIconOrMonitor;
+        public nint hProcess;
+    }
+
+    [LibraryImport("shell32.dll", EntryPoint = "ShellExecuteExW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool ShellExecuteEx(ref SHELLEXECUTEINFOW info);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    internal static partial uint WaitForSingleObject(nint handle, uint milliseconds);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool GetExitCodeProcess(nint process, out uint exitCode);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool CloseHandle(nint handle);
+
+    internal const uint MOVEFILE_DELAY_UNTIL_REBOOT = 0x4;
+
+    [LibraryImport("kernel32.dll", EntryPoint = "MoveFileExW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool MoveFileEx(string existingFileName, string? newFileName, uint flags);
+
+    // ---------------- COM ----------------
+
+    internal const uint COINIT_APARTMENTTHREADED = 0x2;
+    internal const uint COINIT_DISABLE_OLE1DDE = 0x4;
+    internal const uint CLSCTX_INPROC_SERVER = 0x1;
+
+    [LibraryImport("ole32.dll")]
+    internal static partial int CoInitializeEx(nint reserved, uint coInit);
+
+    [LibraryImport("ole32.dll")]
+    internal static partial int CoCreateInstance(in Guid clsid, nint outer, uint clsContext, in Guid iid, out nint instance);
 }

@@ -9,18 +9,23 @@ namespace PcAgent;
 
 internal static class Cli
 {
+    private const int ErrorInstallUserExit = 1602;
+
     private const string Usage = """
         PC Health Agent — PC 성능 진단 에이전트 (로컬 저장 전용, 외부 전송 없음)
 
         사용법:
-          PcAgent.exe install                 서비스 설치 및 시작 (관리자 권한)
-          PcAgent.exe uninstall [--purge]     서비스 제거 (--purge: 수집 데이터도 삭제)
+          PcAgent.exe                         (더블클릭) 메뉴: 설치·업데이트·결과 내보내기·제거
+          PcAgent.exe install                 설치 또는 업데이트 (관리자 권한 — 없으면 확인 창이 뜸)
+          PcAgent.exe uninstall [--purge]     제거 (--purge: 수집 데이터도 삭제)
           PcAgent.exe status                  설치 상태와 수집 현황 확인
-          PcAgent.exe export [--days 14] [--out 폴더]
+          PcAgent.exe export [--days 30] [--out 폴더]
                                               수집 데이터를 진단 리포트(zip)로 내보내기
           PcAgent.exe merge <폴더> [--out 파일.csv]
-                                              여러 PC 의 내보내기 zip 을 하나의 요약 CSV 로 합치기
+                                              여러 PC 의 내보내기 zip 을 요약 CSV·HTML 로 합치기
           PcAgent.exe inventory               하드웨어 사양 확인(JSON)
+          PcAgent.exe version                 버전 출력
+          PcAgent.exe menu                    메뉴 열기 (cmd 에서 실행할 때)
           PcAgent.exe run --data-dir <폴더>   서비스 없이 콘솔에서 수집 실행(테스트용, Ctrl+C 종료)
 
         옵션:
@@ -54,6 +59,23 @@ internal static class Cli
         }
 
         Console.OutputEncoding = Encoding.UTF8;
+
+        // 탐색기에서 더블클릭(또는 시작 메뉴)하면 이 프로세스 전용 콘솔 창이 열림 → 직원용 메뉴
+        if (args.Length == 0 && ConsoleHost.OwnsConsole())
+        {
+            try
+            {
+                return InteractiveMenu.Run();
+            }
+            catch (Exception ex)
+            {
+                // 더블클릭 창은 오류가 나면 바로 닫히므로 읽을 수 있게 멈춤
+                Console.Error.WriteLine($"오류: {ex.Message}");
+                ConsoleHost.Pause();
+                return 1;
+            }
+        }
+
         try
         {
             switch (a.Command)
@@ -78,10 +100,16 @@ internal static class Cli
                     Console.WriteLine(Json.Serialize(inv, AgentJsonContext.Default.InventoryInfo, indented: true));
                     foreach (var w in warnings) Console.Error.WriteLine($"경고: {w}");
                     return 0;
+                case "version":
+                    Console.WriteLine(AppInfo.Version);
+                    return 0;
+                case "menu":
+                    return InteractiveMenu.Run();
                 case "install":
-                    return ServiceInstaller.Install(AgentPaths.Default());
                 case "uninstall":
-                    return ServiceInstaller.Uninstall(AgentPaths.Default(), a.Has("purge"));
+                    if (AdminCommand(args) is { } rc) return rc;
+                    Console.Error.WriteLine("관리자 권한 확인이 취소되어 진행하지 않았습니다.");
+                    return 1;
                 default:
                     Console.WriteLine(Usage);
                     return a.Command is null or "help" ? 0 : 1;
@@ -98,6 +126,67 @@ internal static class Cli
             Console.Error.WriteLine($"오류: {ex.Message}");
             return 1;
         }
+    }
+
+    /// <summary>
+    /// install/uninstall 실행. 관리자 권한이 없으면 UAC 로 자신을 다시 실행합니다(새 창, 끝나면 키 입력 대기).
+    /// UAC 확인 창에서 취소하면 null. --pause 면 결과를 읽을 수 있도록 끝에서 기다립니다(오류가 나도).
+    /// </summary>
+    internal static int? AdminCommand(string[] args)
+    {
+        var a = ParsedArgs.Parse(args);
+        if (!Elevation.IsAdmin())
+        {
+            Console.WriteLine("관리자 권한이 필요합니다. 권한 확인 창에서 [예]를 누르면 새 창에서 진행됩니다.");
+            return Elevation.RunElevated(a.Has("pause") ? args : [.. args, "--pause"]);
+        }
+
+        int result;
+        try
+        {
+            var paths = AgentPaths.Default();
+            if (a.Command == "install")
+            {
+                result = ServiceInstaller.Install(paths);
+            }
+            else
+            {
+                bool? purge = a.Has("purge") ? true : a.Has("ask") ? AskPurge(paths) : false;
+                if (purge is null)
+                {
+                    Console.WriteLine("제거를 취소했습니다.");
+                    result = ErrorInstallUserExit;
+                }
+                else
+                {
+                    result = ServiceInstaller.Uninstall(paths, purge.Value);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"오류: {ex.Message}");
+            result = 1;
+        }
+
+        if (a.Has("pause")) ConsoleHost.Pause();
+        return result;
+    }
+
+    /// <summary>제거 시 데이터 처리 확인(설정 앱·메뉴에서 제거할 때). 취소하면 null.</summary>
+    private static bool? AskPurge(AgentPaths paths)
+    {
+        Console.WriteLine("PC Health Agent 를 제거합니다.");
+        Console.WriteLine($"이 PC 에 모인 수집 데이터({paths.Root})는 어떻게 할까요?");
+        Console.WriteLine("  1. 함께 삭제");
+        Console.WriteLine("  2. 남겨두기 (다시 설치하면 이어서 사용)");
+        Console.WriteLine("  0. 제거 취소");
+        return ConsoleHost.Choose("번호를 누르세요: ", "120") switch
+        {
+            '1' => true,
+            '2' => false,
+            _ => null,
+        };
     }
 
     private static async Task<int> RunConsoleAsync(AgentPaths paths)
@@ -130,35 +219,49 @@ internal static class Cli
     private static int Merge(ParsedArgs a)
     {
         var dir = a.Positional.FirstOrDefault() ?? Directory.GetCurrentDirectory();
-        var (file, count) = FleetMerge.Run(dir, a.Get("out"));
-        Console.WriteLine($"PC {count}대 요약을 합쳤습니다: {file}");
+        var r = FleetMerge.Run(dir, a.Get("out"));
+        Console.WriteLine($"PC {r.Count}대 결과를 합쳤습니다.");
+        Console.WriteLine($"  요약 CSV : {r.CsvPath}");
+        Console.WriteLine($"  리포트   : {r.HtmlPath}");
+        if (r.Skipped.Count > 0) Console.WriteLine($"  읽지 못한 파일 {r.Skipped.Count}개: {string.Join(", ", r.Skipped)}");
         return 0;
     }
 
-    private static int Status(AgentPaths paths)
+    internal static int Status(AgentPaths paths)
     {
         var store = new DataStore(paths.DataDir);
         var (files, bytes, oldest, newest) = store.GetStats();
         var last = store.ReadLastMetric();
         Console.WriteLine($"PC Health Agent v{AppInfo.Version}");
-        Console.WriteLine($"서비스      : {ServiceInstaller.GetServiceStatus()}");
+        Console.WriteLine($"서비스      : {ServiceInstaller.GetServiceStatus()}" +
+                          (ServiceInstaller.InstalledVersion() is { } iv ? $" (설치 버전 v{iv})" : ""));
         Console.WriteLine($"데이터 폴더 : {paths.Root}");
         if (Directory.Exists(paths.Root))
         {
             bool secure = SecureDirectory.IsTrusted(paths.Root, out var reason)
                           && (!Directory.Exists(paths.DataDir) || SecureDirectory.IsTrusted(paths.DataDir, out reason));
-            Console.WriteLine(secure ? "폴더 보안  : 정상" : $"폴더 보안  : 주의 — {reason} (서비스용 폴더라면 관리자 권한으로 install 재실행)");
+            Console.WriteLine(secure ? "폴더 보안   : 정상" : $"폴더 보안   : 주의 — {reason} (서비스용 폴더라면 관리자 권한으로 install 재실행)");
         }
         Console.WriteLine(files == 0
             ? "수집 데이터 : 없음"
             : $"수집 데이터 : 파일 {files}개, {bytes / 1024.0:0.#}KB, {oldest:yyyy-MM-dd} ~ {newest:yyyy-MM-dd} (UTC)");
         if (last is not null)
             Console.WriteLine($"마지막 측정 : {last.MinuteUtc.ToLocalTime():yyyy-MM-dd HH:mm} · CPU {last.CpuAvg}% · 가용 메모리 {last.MemAvailAvg}%");
+
+        var usage = AgentUsage.Read(paths.Root);
+        var liveMb = AgentUsage.ServicePrivateMb();
+        if (usage is not null || liveMb is not null)
+        {
+            var parts = new List<string> { $"메모리 {(liveMb ?? usage!.PrivateMb):0.#}MB" };
+            if (usage?.CpuAvgPercent is { } cpu)
+                parts.Add($"CPU 평균 {cpu:0.###}% (가동 {(usage.UpdatedUtc - usage.StartedUtc).TotalHours:0.#}시간 기준)");
+            Console.WriteLine($"에이전트    : {string.Join(" · ", parts)}");
+        }
         Console.WriteLine($"설정 파일   : {paths.ConfigFile}{(File.Exists(paths.ConfigFile) ? "" : " (없음 — 기본값 사용)")}");
         return 0;
     }
 
-    private static string DefaultExportDir(AgentPaths paths)
+    internal static string DefaultExportDir(AgentPaths paths)
     {
         var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
         bool systemProfile = desktop.Contains("systemprofile", StringComparison.OrdinalIgnoreCase);
@@ -167,7 +270,7 @@ internal static class Cli
             : Path.Combine(paths.Root, "exports");
     }
 
-    private sealed class ParsedArgs
+    internal sealed class ParsedArgs
     {
         private readonly Dictionary<string, string?> _options = new(StringComparer.OrdinalIgnoreCase);
         public string? Command { get; private set; }

@@ -3,6 +3,7 @@ using System.Net;
 using PcAgent.Analysis;
 using PcAgent.Collection;
 using PcAgent.EventLogs;
+using PcAgent.Inventory;
 
 namespace PcAgent.Export;
 
@@ -75,6 +76,7 @@ internal static class HtmlReport
             $"{(d.IsSystem ? "[시스템] " : "")}{d.Model} · {d.MediaType} · {d.BusType} · {d.SizeGb:0}GB")));
         if (sysVol is not null) Row(w, "시스템 드라이브", $"{sysVol.Name} 여유 {sysVol.FreeGb:0.#}GB / {sysVol.SizeGb:0.#}GB");
         Row(w, "그래픽", string.Join(", ", inv.Gpus));
+        if (inv.Batteries.Count > 0) Row(w, "배터리", BatteryLabel(inv));
         Row(w, "OS", $"{inv.OsName} {inv.OsDisplayVersion} (빌드 {inv.OsBuild}.{inv.OsUbr})");
         Row(w, "BIOS", Join(" ", inv.BiosVendor, inv.BiosVersion, inv.BiosDate) +
                        (inv.EstimatedAgeYears is { } age ? $" · 추정 연식 {age:0.#}년" : ""));
@@ -147,7 +149,22 @@ internal static class HtmlReport
             foreach (var warn in s.Warnings) w.Write($"<li>{H(warn)}</li>");
             w.Write("</ul>");
         }
-        w.Write($"<p>PC Health Agent v{H(s.AgentVersion)} · 생성 {Exporter.Local(s.GeneratedUtc, tz):yyyy-MM-dd HH:mm}</p></footer></div></body></html>");
+        var usage = s.AgentUsage is { } u
+            ? $" · 에이전트 자체 사용량: 메모리 {u.PrivateMb:0.#}MB" + (u.CpuAvgPercent is { } cpu ? $", CPU 평균 {cpu:0.###}%" : "")
+            : "";
+        w.Write($"<p>PC Health Agent v{H(s.AgentVersion)} · 생성 {Exporter.Local(s.GeneratedUtc, tz):yyyy-MM-dd HH:mm}{H(usage)}</p></footer></div></body></html>");
+    }
+
+    internal static string BatteryLabel(InventoryInfo inv)
+    {
+        var parts = new List<string>();
+        if (inv.BatteryHealthPercent is { } health) parts.Add($"수명 {health:0.#}%");
+        foreach (var b in inv.Batteries)
+        {
+            parts.Add($"완충 {b.FullChargedCapacity:N0} / 설계 {b.DesignedCapacity:N0}{(b.Relative ? "" : "mWh")}" +
+                      (b.CycleCount is { } c ? $" · 충전 {c}회" : "") + (b.Chemistry is null ? "" : $" · {b.Chemistry}"));
+        }
+        return string.Join(" · ", parts);
     }
 
     private static void Offenders(TextWriter w, string title, List<Offender> list, Func<Offender, string> metric, string metricLabel)
@@ -180,9 +197,9 @@ internal static class HtmlReport
 
     private static string Join(string sep, params string?[] parts) => string.Join(sep, parts.Where(p => !string.IsNullOrWhiteSpace(p)));
 
-    private static string H(string? s) => WebUtility.HtmlEncode(s ?? "");
+    internal static string H(string? s) => WebUtility.HtmlEncode(s ?? "");
 
-    private const string Css = """
+    internal const string Css = """
         :root{--bg:#f5f6f8;--card:#fff;--text:#1c2230;--muted:#667085;--line:#e4e7ec;--bar:#4f6bd8;
         --high:#c4320a;--high-bg:#fef3f2;--med:#a15c07;--med-bg:#fef7e6;--low:#3e4784;--low-bg:#eef2ff;--ok:#067647;--ok-bg:#ecfdf3}
         @media (prefers-color-scheme:dark){:root{--bg:#0f1218;--card:#171b23;--text:#e6e9ef;--muted:#98a2b3;--line:#2a303c;--bar:#7b93f0;

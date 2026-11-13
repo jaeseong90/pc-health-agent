@@ -11,6 +11,7 @@ internal sealed class AgentRunner(AgentPaths paths)
 {
     private static readonly TimeSpan MaintenanceInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan CleanupInterval = TimeSpan.FromHours(6);
+    private static readonly TimeSpan UsageInterval = TimeSpan.FromHours(1);
 
     public async Task RunAsync(CancellationToken ct)
     {
@@ -27,6 +28,7 @@ internal sealed class AgentRunner(AgentPaths paths)
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(config.SampleIntervalSeconds));
         var nextMaintenance = DateTimeOffset.UtcNow + MaintenanceInterval;
         var nextCleanup = DateTimeOffset.UtcNow + CleanupInterval;
+        var nextUsage = DateTimeOffset.UtcNow;   // 첫 유지보수 시점(5분 뒤)에 처음 기록
         var errors = new ErrorThrottle();
 
         try
@@ -57,6 +59,12 @@ internal sealed class AgentRunner(AgentPaths paths)
                         nextCleanup = now + CleanupInterval;
                         Cleanup(store, config);
                     }
+
+                    if (now >= nextUsage)
+                    {
+                        nextUsage = now + UsageInterval;
+                        WriteUsage();
+                    }
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -83,7 +91,20 @@ internal sealed class AgentRunner(AgentPaths paths)
             {
                 Log.Error("종료 처리 실패", ex);
             }
+            WriteUsage();
             Log.Info("중지");
+        }
+    }
+
+    private void WriteUsage()
+    {
+        try
+        {
+            AgentUsage.Write(paths.Root);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"자원 사용량 기록 실패: {ex.Message}");
         }
     }
 

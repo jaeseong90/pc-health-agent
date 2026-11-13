@@ -3,6 +3,7 @@ using System.Text;
 using PcAgent.Analysis;
 using PcAgent.Collection;
 using PcAgent.EventLogs;
+using PcAgent.Hosting;
 using PcAgent.Inventory;
 using PcAgent.Privacy;
 using PcAgent.Storage;
@@ -19,6 +20,8 @@ public sealed class ExportSummary
     public string TimeZone { get; set; } = "";
     public InventoryInfo Inventory { get; set; } = new();
     public AnalysisResult Analysis { get; set; } = new();
+    /// <summary>에이전트 자체 자원 사용량(서비스 기록). 없으면 null.</summary>
+    public AgentUsageInfo? AgentUsage { get; set; }
     public List<string> Warnings { get; set; } = [];
 }
 
@@ -35,6 +38,7 @@ internal static class Exporter
         "제조사", "모델", "시리얼", "CPU", "코어", "RAM(GB)", "RAM슬롯(사용/전체)", "시스템디스크", "시스템드라이브여유(GB)",
         "OS", "OS빌드", "Win11", "TPM", "BIOS날짜", "추정연식(년)",
         "블루스크린", "비정상종료", "앱크래시", "평균부팅(초)", "메모리부족주원인", "CPU포화주원인",
+        "배터리수명(%)", "에이전트버전", "에이전트CPU(%)", "에이전트메모리(MB)",
     ];
 
     public static string Run(AgentPaths paths, AgentConfig config, int days, string outDir, Action<string> progress)
@@ -81,6 +85,7 @@ internal static class Exporter
             TimeZone = tz.Id,
             Inventory = inventory,
             Analysis = analysis,
+            AgentUsage = AgentUsage.Read(paths.Root),
             Warnings = warnings,
         };
 
@@ -129,11 +134,17 @@ internal static class Exporter
 
     private static void WriteSummary(CsvWriter csv, ExportSummary s, TimeZoneInfo tz)
     {
+        csv.Row(SummaryHeader);
+        WriteSummaryRow(csv, s, tz);
+    }
+
+    /// <summary>PC 1대 요약 행(SummaryHeader 순서). merge 에서도 사용합니다.</summary>
+    internal static void WriteSummaryRow(CsvWriter csv, ExportSummary s, TimeZoneInfo tz)
+    {
         var a = s.Analysis;
         var inv = s.Inventory;
         var sysDisk = inv.Disks.FirstOrDefault(d => d.IsSystem);
         var sysVol = inv.Volumes.FirstOrDefault(v => v.IsSystem);
-        csv.Row(SummaryHeader);
         csv.Row(
             inv.Hostname,
             Local(s.GeneratedUtc, tz).ToString("yyyy-MM-dd HH:mm"),
@@ -170,7 +181,11 @@ internal static class Exporter
             a.Stability.AppCrashes,
             a.Stability.BootAvgSec,
             a.MemoryOffenders.FirstOrDefault()?.Name,
-            a.CpuOffenders.FirstOrDefault()?.Name);
+            a.CpuOffenders.FirstOrDefault()?.Name,
+            inv.BatteryHealthPercent,
+            s.AgentVersion,
+            s.AgentUsage?.CpuAvgPercent?.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture),   // 0.00x% 단위라 기본 2자리면 0 으로 보임
+            s.AgentUsage?.PrivateMb);
     }
 
     private static void WriteMetrics(CsvWriter csv, List<MetricMinute> metrics, TimeZoneInfo tz)

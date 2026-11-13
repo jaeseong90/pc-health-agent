@@ -19,6 +19,9 @@ public static class UpgradeAdvisor
     private const double DiskBusySsdPct = 10;
     private const double ReplaceAgeYears = 5;
     private const int MinSnapshotEventsForDominance = 3;
+    private const double BatteryReplaceHighPct = 40;
+    private const double BatteryReplacePct = 60;
+    private const double BatteryWatchPct = 80;
 
     public static AnalysisResult Analyze(AnalysisInput input)
     {
@@ -187,7 +190,7 @@ public static class UpgradeAdvisor
         // 한 프로그램이 원인인지: 프로세스 스냅샷이 있는 이벤트만 분모로 사용(빈도 제한으로 생략된 이벤트 제외)
         int memSnapshots = SnapshotEvents(input.Events, PressureKind.Memory);
         var memTop = r.MemoryOffenders.FirstOrDefault();
-        if (memTop is not null && memSnapshots >= MinSnapshotEventsForDominance && memTop.Rank1 >= 0.6 * memSnapshots)
+        if (sufficient && memTop is not null && memSnapshots >= MinSnapshotEventsForDominance && memTop.Rank1 >= 0.6 * memSnapshots)
         {
             Add("SOFTWARE_REVIEW", "Medium", $"프로그램 점검: {memTop.Name}",
                 $"프로세스 기록이 있는 메모리 부족 {memSnapshots}건 중 {memTop.Rank1}건에서 '{memTop.Name}' 이(가) 메모리 사용 1위(평균 {memTop.AvgPrivateMb:0}MB). 증설 전에 해당 프로그램의 과다 사용·누수 여부를 확인하세요.",
@@ -252,6 +255,21 @@ public static class UpgradeAdvisor
             Add("STABILITY_CHECK", "High", "하드웨어 안정성 점검", $"블루스크린 {stab.BugChecks}회 — 메모리·디스크·드라이버 점검이 필요합니다.");
         else if (stab.UnexpectedShutdowns >= 3 || stab.BugChecks == 1)
             Add("STABILITY_CHECK", "Medium", "안정성 점검", $"비정상 종료 {stab.UnexpectedShutdowns}회, 블루스크린 {stab.BugChecks}회.");
+
+        // 6) 배터리(노트북): 완충 용량이 설계 대비 줄면 전원 없이 쓰는 시간이 짧아지고 갑자기 꺼질 수 있음
+        if (inv.BatteryHealthPercent is { } battery)
+        {
+            int cycleCount = inv.Batteries.Sum(b => b.CycleCount ?? 0);
+            string cycles = cycleCount > 0 ? $", 충전 횟수 {cycleCount}회" : "";
+            if (battery <= BatteryReplaceHighPct)
+                Add("BATTERY_REPLACE", "High", "배터리 교체",
+                    $"배터리 수명이 설계 용량의 {battery:0}%로 크게 줄었습니다{cycles}. 전원 없이 쓸 수 있는 시간이 매우 짧고 갑자기 꺼질 수 있습니다.");
+            else if (battery <= BatteryReplacePct)
+                Add("BATTERY_REPLACE", "Medium", "배터리 교체 검토",
+                    $"배터리 수명이 설계 용량의 {battery:0}%입니다{cycles}. 회의·외근 등 전원 없이 자주 쓴다면 교체를 권장합니다.");
+            else if (battery <= BatteryWatchPct)
+                r.Findings.Add($"배터리 수명 {battery:0}%{cycles} — 사용 기간에 따른 정상 노화 범위입니다.");
+        }
 
         if (stab.AppCrashes >= 20)
             r.Findings.Add($"앱 비정상 종료 {stab.AppCrashes}회 (최다: {string.Join(", ", stab.TopCrashApps.Take(3).Select(a => $"{a.Name} {a.Count}회"))}).");

@@ -48,7 +48,40 @@ public sealed class InventoryInfo
     public bool? IsUefi { get; set; }
     public bool? SecureBootEnabled { get; set; }
 
+    /// <summary>노트북 배터리(데스크톱은 비어 있음).</summary>
+    public List<BatteryInfo> Batteries { get; set; } = [];
+
+    /// <summary>배터리 수명(%) = 완충 용량 합 ÷ 설계 용량 합. 배터리가 없거나 값이 비정상이면 null.</summary>
+    public double? BatteryHealthPercent
+    {
+        get
+        {
+            var valid = Batteries.Where(b => b.HealthPercent is not null).ToList();
+            return valid.Count == 0 ? null
+                : Math.Round(valid.Sum(b => (double)b.FullChargedCapacity) * 100 / valid.Sum(b => (double)b.DesignedCapacity), 1);
+        }
+    }
+
     public double UptimeHours { get; set; }
+}
+
+public sealed class BatteryInfo
+{
+    /// <summary>배터리 화학 종류(LION, LiP 등).</summary>
+    public string? Chemistry { get; set; }
+    /// <summary>설계 용량. Relative 가 false 면 mWh.</summary>
+    public long DesignedCapacity { get; set; }
+    /// <summary>현재 완충 용량. 노화할수록 줄어듭니다.</summary>
+    public long FullChargedCapacity { get; set; }
+    /// <summary>true 면 용량 단위가 mWh 가 아닌 상대값(비율 계산은 가능).</summary>
+    public bool Relative { get; set; }
+    public int? CycleCount { get; set; }
+
+    /// <summary>완충 ÷ 설계(%). 설계 용량이 없거나 완충이 설계의 1.5배를 넘는 등 비정상 값이면 null.</summary>
+    public double? HealthPercent =>
+        DesignedCapacity > 0 && FullChargedCapacity > 0 && FullChargedCapacity <= DesignedCapacity * 3 / 2
+            ? Math.Round(FullChargedCapacity * 100.0 / DesignedCapacity, 1)
+            : null;
 }
 
 public sealed class MemoryModule
