@@ -40,6 +40,8 @@ internal static class Exporter
         "블루스크린", "비정상종료", "앱크래시", "평균부팅(초)", "메모리부족주원인", "CPU포화주원인",
         "배터리수명(%)", "에이전트버전", "에이전트CPU(%)", "에이전트메모리(MB)",
         "디스크상태", "SSD수명사용(%)", "디스크사용시간(h)",
+        // v0.5.0 (이전 버전이 내보낸 파일은 측정값이 없는 칸을 비워 둠)
+        "메모리부족(분/8시간)", "메모리여유20%이하(%)", "필요메모리상위5%(GB)", "디스크응답상위5%(ms)", "CPU속도_부하시(%)", "측정일수", "결론",
     ];
 
     public static string Run(AgentPaths paths, AgentConfig config, int days, string outDir, Action<string> progress)
@@ -148,6 +150,7 @@ internal static class Exporter
         var inv = s.Inventory;
         var sysDisk = inv.Disks.FirstOrDefault(d => d.IsSystem);
         var sysVol = inv.Volumes.FirstOrDefault(v => v.IsSystem);
+        bool hasSummary = a.Headline.Length > 0;   // v0.5.0 이후가 내보낸 파일
         csv.Row(
             inv.Hostname,
             Local(s.GeneratedUtc, tz).ToString("yyyy-MM-dd HH:mm"),
@@ -191,20 +194,29 @@ internal static class Exporter
             s.AgentUsage?.PrivateMb,
             sysDisk?.Health is { } dh ? DiskHealth.LevelLabel(dh.Level) : "확인 불가",
             sysDisk?.Health?.PercentageUsed,
-            sysDisk?.Health?.PowerOnHours);
+            sysDisk?.Health?.PowerOnHours,
+            UsageStats.MinutesPer8h(a.Stats.MemPressurePct),
+            hasSummary ? a.Stats.MemTight20Pct : (double?)null,
+            a.Stats.CommitGbP95,
+            a.Stats.DiskLatencyP95Ms,
+            a.Stats.CpuPerfUnderLoad,
+            hasSummary ? a.Stats.BasisDays : (int?)null,
+            a.Headline);
     }
 
     private static void WriteMetrics(CsvWriter csv, List<MetricMinute> metrics, TimeZoneInfo tz)
     {
         csv.Row("local_time", "utc_time", "samples", "covered_sec", "cpu_avg", "cpu_max", "mem_avail_avg", "mem_avail_min",
             "commit_avg", "commit_max", "hard_faults_avg", "disk_active_avg", "disk_active_max", "disk_queue_avg",
-            "cpu_high_sec", "mem_pressure_sec", "disk_busy_sec");
+            "cpu_high_sec", "mem_pressure_sec", "disk_busy_sec",
+            "commit_gb_max", "cpu_perf_avg", "disk_latency_ms_avg", "disk_latency_ms_max", "battery_sec");
         foreach (var m in metrics)
         {
             csv.Row(Local(m.MinuteUtc, tz).ToString("yyyy-MM-dd HH:mm"), m.MinuteUtc.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 m.Samples, m.CoveredSeconds, m.CpuAvg, m.CpuMax, m.MemAvailAvg, m.MemAvailMin, m.CommitAvg, m.CommitMax,
                 m.HardFaultsAvg, m.DiskActiveAvg, m.DiskActiveMax, m.DiskQueueAvg,
-                m.CpuHighSeconds, m.MemPressureSeconds, m.DiskBusySeconds);
+                m.CpuHighSeconds, m.MemPressureSeconds, m.DiskBusySeconds,
+                m.CommitGbMax, m.CpuPerfAvg, m.DiskLatencyAvg, m.DiskLatencyMax, m.BatterySeconds);
         }
     }
 
@@ -214,7 +226,7 @@ internal static class Exporter
             "commit_pct", "disk_active_pct", "snapshot_skipped", "top1", "top2", "top3");
         foreach (var e in events)
         {
-            var top = e.RankedProcesses().Take(3).Select(p => p.Name).ToList();
+            var top = e.RankedByName().Take(3).Select(p => p.Name).ToList();
             csv.Row(e.Id.ToString("N")[..12], KindLabel(e.Kind),
                 Local(e.StartedUtc, tz).ToString("yyyy-MM-dd HH:mm:ss"),
                 e.EndedUtc is { } end ? Local(end, tz).ToString("yyyy-MM-dd HH:mm:ss") : null,
@@ -296,10 +308,10 @@ internal static class Exporter
     private const string ReadmeText = """
         PC Health Agent 내보내기 파일
 
-        report.html            사람이 보는 진단 리포트 (브라우저로 열기)
+        report.html            사람이 보는 진단 리포트 (브라우저로 열기). 맨 위 '요약'이 제출용 1장 — 인쇄하면 첫 장에 들어갑니다
         summary.csv            PC 1대 요약 1행 — 여러 PC 결과를 합칠 때 사용 (PcAgent.exe merge)
         summary.json           요약 전체(사양, 판정, 통계)
-        metrics_minute.csv     1분 단위 CPU/메모리/디스크 지표
+        metrics_minute.csv     1분 단위 CPU/메모리/디스크 지표 (커밋 용량·CPU 속도·디스크 응답 시간·배터리 사용 포함)
         pressure_events.csv    자원 부족(CPU 포화, 메모리 부족, 디스크 포화) 이벤트
         pressure_processes.csv 자원 부족 시점의 상위 프로세스
         event_logs.csv         블루스크린, 비정상 종료, 앱 크래시, 부팅 시간 등 Windows 이벤트

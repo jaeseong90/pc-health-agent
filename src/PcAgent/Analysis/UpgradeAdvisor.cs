@@ -11,17 +11,28 @@ public static class UpgradeAdvisor
 {
     /// <summary>성능 기반 판정에 필요한 최소 관측 시간. 업무시간 데이터가 이보다 적으면 전체 시간 기준으로 판정.</summary>
     public const double MinObservedHours = 8;
-    private const double MemPressureHighPct = 5;
-    private const double MemPressureWatchPct = 2;
-    private const double CpuHighPct = 10;
-    private const double CpuWatchPct = 4;
-    private const double DiskBusyHddPct = 3;
+    internal const double MemPressureHighPct = 5;
+    internal const double MemPressureWatchPct = 2;
+    /// <summary>가용 메모리 20% 이하로 쓴 시간이 이 비율을 넘으면 '빠듯함'으로 알림(부족 기준에는 못 미쳐도).</summary>
+    internal const double MemTightNotePct = 30;
+    internal const double CpuHighPct = 10;
+    internal const double CpuWatchPct = 4;
+    /// <summary>CPU 를 많이 쓸 때의 속도가 정격의 이 비율보다 낮으면 발열·전원 제한으로 봄.</summary>
+    internal const double CpuThrottledPct = 75;
+    /// <summary>'CPU 를 많이 쓰는 중'으로 보는 1분 평균 사용률.</summary>
+    private const double CpuLoadedPct = 20;
+    internal const double DiskBusyHddPct = 3;
     private const double DiskBusySsdPct = 10;
-    private const double ReplaceAgeYears = 5;
+    /// <summary>SSD 인데 응답 시간 상위 5%가 이보다 길면 알림(ms).</summary>
+    private const double SsdSlowLatencyMs = 50;
+    internal const double ReplaceAgeYears = 5;
     private const int MinSnapshotEventsForDominance = 3;
-    private const double BatteryReplaceHighPct = 40;
-    private const double BatteryReplacePct = 60;
+    internal const double BatteryReplaceHighPct = 40;
+    internal const double BatteryReplacePct = 60;
     private const double BatteryWatchPct = 80;
+    /// <summary>비교·분포 통계에 필요한 최소 표본(분).</summary>
+    private const int MinMinutesForComparison = 10;
+    private const int MinMinutesForDistribution = 60;
 
     public static AnalysisResult Analyze(AnalysisInput input)
     {
@@ -65,6 +76,63 @@ public static class UpgradeAdvisor
             {
                 st.HardFaultsAvg = Round(hf.Average());
                 st.HardFaultsP95 = Round(Percentile(hf, 95));
+            }
+
+            // 빠듯한 구간: 부족 기준(기본 가용 10%) 하나만 보면 한계 근처에서 쓰는 시간이 가려짐
+            st.MemTight20Pct = Round(basis.Where(m => m.MemAvailAvg <= 20).Sum(m => (double)m.CoveredSeconds) * 100 / covered);
+            st.MemTight15Pct = Round(basis.Where(m => m.MemAvailAvg <= 15).Sum(m => (double)m.CoveredSeconds) * 100 / covered);
+            st.MemPressureMinutes = Math.Round(basis.Sum(m => (double)m.MemPressureSeconds) / 60);
+
+            // 날짜별: 여러 날에 걸쳐 반복되는지, 하루에 몰렸는지 (1시간 미만 관측한 날은 '하루'로 세지 않음)
+            var days = basis
+                .GroupBy(m => LocalDate(m.MinuteUtc))
+                .Select(g => (Date: g.Key, Covered: g.Sum(m => (double)m.CoveredSeconds), Mem: g.Sum(m => (double)m.MemPressureSeconds)))
+                .Where(d => d.Covered >= 3600)
+                .ToList();
+            st.BasisDays = days.Count;
+            st.MemPressureDays = days.Count(d => d.Mem >= 300);
+            if (days.Count > 0)
+            {
+                var worst = days.MaxBy(d => d.Mem);
+                if (worst.Mem > 0)
+                {
+                    st.MemWorstDay = worst.Date.ToString("yyyy-MM-dd");
+                    st.MemWorstDayMinutes = Math.Round(worst.Mem / 60);
+                }
+            }
+
+            // 메모리 부족이 실제 지연(디스크에서 다시 읽기)으로 이어지는지: 부족하던 분과 아니던 분의 하드 폴트 비교
+            var hfPressure = basis.Where(m => m.HardFaultsAvg.HasValue && m.MemPressureSeconds > 0).Select(m => m.HardFaultsAvg!.Value).ToList();
+            var hfCalm = basis.Where(m => m.HardFaultsAvg.HasValue && m.MemPressureSeconds == 0).Select(m => m.HardFaultsAvg!.Value).ToList();
+            if (hfPressure.Count >= MinMinutesForComparison && hfCalm.Count >= MinMinutesForComparison)
+            {
+                st.HardFaultsPressureMedian = Round(Percentile(hfPressure, 50));
+                st.HardFaultsCalmMedian = Round(Percentile(hfCalm, 50));
+            }
+
+            // v0.5.0 부터 수집하는 지표(이전 데이터에는 없으므로 표본이 충분할 때만)
+            var commit = basis.Where(m => m.CommitGbMax.HasValue).Select(m => m.CommitGbMax!.Value).ToList();
+            if (commit.Count >= MinMinutesForDistribution)
+            {
+                st.CommitGbP95 = Round(Percentile(commit, 95));
+                st.CommitGbMax = Round(commit.Max());
+            }
+            var loaded = basis.Where(m => m.CpuPerfAvg.HasValue && m.CpuAvg >= CpuLoadedPct).ToList();
+            if (loaded.Count >= MinMinutesForComparison)
+            {
+                double weight = loaded.Sum(m => m.CpuAvg * m.CoveredSeconds);
+                if (weight > 0) st.CpuPerfUnderLoad = Round(loaded.Sum(m => m.CpuPerfAvg!.Value * m.CpuAvg * m.CoveredSeconds) / weight);
+            }
+            var latency = basis.Where(m => m.DiskLatencyAvg.HasValue).Select(m => m.DiskLatencyAvg!.Value).ToList();
+            if (latency.Count >= MinMinutesForDistribution)
+            {
+                st.DiskLatencyAvgMs = Round(latency.Average());
+                st.DiskLatencyP95Ms = Round(Percentile(latency, 95));
+            }
+            var power = basis.Where(m => m.BatterySeconds.HasValue).ToList();
+            if (inv.Batteries.Count > 0 && power.Count >= MinMinutesForDistribution)
+            {
+                st.OnBatteryPct = Round(power.Sum(m => (double)m.BatterySeconds!.Value) * 100 / Math.Max(1, power.Sum(m => (double)m.CoveredSeconds)));
             }
         }
         st.CpuEvents = input.Events.Count(e => e.Kind == PressureKind.Cpu);
@@ -162,7 +230,7 @@ public static class UpgradeAdvisor
         else if (sufficient && (st.MemPressurePct >= MemPressureHighPct || r.Stability.LowMemoryWarnings >= 2))
         {
             ramShortage = st.MemPressurePct >= MemPressureHighPct
-                ? $"{basisLabel}의 {st.MemPressurePct:0.#}%에서 메모리 부족(가용 ≤{c.MemoryAvailableLowPercent:0}% 또는 커밋 ≥{c.CommitHighPercent:0}%)"
+                ? $"{basisLabel}의 {st.MemPressurePct:0.#}%에서 메모리 부족(가용 ≤{c.MemoryAvailableLowPercent:0}% 또는 커밋 ≥{c.CommitHighPercent:0}%) — {MemEvidence(st)}"
                 : $"Windows 메모리 부족 경고 {r.Stability.LowMemoryWarnings}회";
         }
 
@@ -187,14 +255,28 @@ public static class UpgradeAdvisor
         }
         else if (sufficient && st.MemPressurePct >= MemPressureWatchPct)
         {
+            // 온보드 메모리는 증설할 수 없으므로 '증설 검토'를 권하면 안 됨
+            string next = inv.RamSoldered
+                ? $"메모리가 온보드(납땜)라 증설할 수 없습니다. 부족이 늘면 {TargetRam(ramGb)}GB 이상 PC 로 교체를 검토하세요."
+                : $"추세를 지켜보고 증가 시 {TargetRam(ramGb)}GB 증설을 검토하세요.";
             Add("RAM_WATCH", "Medium", "메모리 사용 관찰",
-                $"{basisLabel}의 {st.MemPressurePct:0.#}%에서 메모리 부족이 관측됐습니다. 추세를 지켜보고 증가 시 {TargetRam(ramGb)}GB 증설을 검토하세요.");
+                $"{basisLabel}의 {st.MemPressurePct:0.#}%에서 메모리 부족이 관측됐습니다 — {MemEvidence(st)}. {next}");
+        }
+        else if (sufficient && st.MemTight20Pct >= MemTightNotePct)
+        {
+            r.Findings.Add($"메모리 부족 기준에는 못 미치지만, 가용 메모리 20% 이하로 쓴 시간이 {basisLabel}의 {st.MemTight20Pct:0.#}%입니다 — 프로그램을 더 띄우면 부족해질 수 있습니다.");
+        }
+
+        double ramVisibleGb = (inv.RamVisibleMb > 0 ? inv.RamVisibleMb : inv.RamInstalledMb) / 1024.0;
+        if (sufficient && ramVisibleGb > 0 && st.CommitGbP95 > ramVisibleGb)
+        {
+            r.Findings.Add($"프로그램들이 요구한 메모리(커밋)가 상위 5% 구간에서 {st.CommitGbP95:0.#}GB로, 설치 메모리 {ramGb:0.#}GB를 넘습니다 — 넘는 만큼은 디스크(페이지 파일)에 의존합니다.");
         }
 
         if (memDominated && memTop is not null)
         {
             Add("SOFTWARE_REVIEW", "Medium", $"프로그램 점검: {memTop.Name}",
-                $"프로세스 기록이 있는 메모리 부족 {memSnapshots}건 중 {memTop.Rank1}건에서 '{memTop.Name}' 이(가) 메모리 사용 1위(평균 {memTop.AvgPrivateMb:0}MB). 증설 전에 해당 프로그램의 과다 사용·누수 여부를 확인하세요.",
+                $"프로세스 기록이 있는 메모리 부족 {memSnapshots}건 중 {memTop.Rank1}건에서 '{memTop.Name}' 이(가) 메모리 사용 1위(평균 {memTop.AvgPrivateMb:0}MB). {(inv.RamSoldered ? "교체" : "증설")}를 결정하기 전에 해당 프로그램의 과다 사용·누수 여부를 확인하세요.",
                 key: "SOFTWARE_REVIEW" + $"프로그램 점검: {memTop.Name}");
         }
 
@@ -203,12 +285,17 @@ public static class UpgradeAdvisor
         if (sysDisk?.MediaType == "HDD")
         {
             bool busy = sufficient && st.DiskBusyPct >= DiskBusyHddPct;
+            string latencyNote = sufficient && st.DiskLatencyAvgMs is { } hddMs ? $" 디스크 응답 시간은 평균 {hddMs:0.#}ms 입니다(SSD 는 보통 1ms 안팎)." : "";
             Add("SSD_REPLACE", busy ? "High" : "Medium", "SSD 교체",
-                $"시스템 디스크가 HDD 입니다{(busy ? $"(디스크 포화 {st.DiskBusyPct:0.#}%)" : "")}. SSD 교체가 비용 대비 체감 효과가 가장 큽니다.");
+                $"시스템 디스크가 HDD 입니다{(busy ? $"(디스크 포화 {st.DiskBusyPct:0.#}% — 8시간 사용 기준 하루 약 {UsageStats.MinutesPer8h(st.DiskBusyPct):0.#}분)" : "")}. SSD 교체가 비용 대비 체감 효과가 가장 큽니다.{latencyNote}");
         }
         else if (sufficient && st.DiskBusyPct >= DiskBusySsdPct)
         {
             r.Findings.Add($"SSD 사용 중이지만 디스크 포화 비율이 {st.DiskBusyPct:0.#}% 입니다. 백신 검사·동기화·인덱싱 프로그램을 확인하세요.");
+        }
+        if (sufficient && sysDisk?.MediaType == "SSD" && st.DiskLatencyP95Ms >= SsdSlowLatencyMs)
+        {
+            r.Findings.Add($"SSD 인데 디스크 응답 시간이 상위 5% 구간에서 {st.DiskLatencyP95Ms:0.#}ms 로 깁니다 — 디스크 상태와 백신 검사·동기화 프로그램을 확인하세요.");
         }
 
         // 디스크 건강(SMART): 고장 위험이면 즉시 백업·교체, 주의면 점검
@@ -246,12 +333,13 @@ public static class UpgradeAdvisor
             if (cpuSupport == CpuSupport.Unsupported) reasons.Add("구형 CPU");
             if (inv.CpuCores is > 0 and <= 2) reasons.Add($"{inv.CpuCores}코어");
 
+            string perDay = $"8시간 사용 기준 하루 약 {UsageStats.MinutesPer8h(st.CpuHighPct):0.#}분";
             if (reasons.Count > 0)
                 Add("PC_REPLACE", "High", "PC 교체",
-                    $"{basisLabel}의 {st.CpuHighPct:0.#}%에서 CPU 포화(≥{c.CpuHighPercent:0}%) — CPU 성능 부족({string.Join(", ", reasons)}).");
+                    $"{basisLabel}의 {st.CpuHighPct:0.#}%에서 CPU 포화(≥{c.CpuHighPercent:0}%, {perDay}) — CPU 성능 부족({string.Join(", ", reasons)}).");
             else if (!cpuDominated)
                 Add("CPU_REVIEW", "Medium", "CPU 사용 검토",
-                    $"{basisLabel}의 {st.CpuHighPct:0.#}%에서 CPU 포화가 관측됐습니다. 사용 프로그램 대비 CPU 사양이 부족할 수 있으니 상위 프로세스를 확인하세요.");
+                    $"{basisLabel}의 {st.CpuHighPct:0.#}%에서 CPU 포화가 관측됐습니다({perDay}). 사용 프로그램 대비 CPU 사양이 부족할 수 있으니 상위 프로세스를 확인하세요.");
         }
         else if (sufficient && st.CpuHighPct >= CpuWatchPct)
         {
@@ -263,6 +351,13 @@ public static class UpgradeAdvisor
             Add("SOFTWARE_REVIEW", "Medium", $"프로그램 점검: {cpuTop!.Name}",
                 $"프로세스 기록이 있는 CPU 포화 {cpuSnapshots}건 중 {cpuTop.Rank1}건에서 '{cpuTop.Name}' 이(가) CPU 사용 1위(평균 {cpuTop.AvgCpu:0.#}%).",
                 key: "SOFTWARE_REVIEW" + $"프로그램 점검: {cpuTop.Name}");
+        }
+
+        // CPU 사용률은 높지 않아도 속도 자체가 제한되면 느림(발열·전원 설정). 배터리 사용이 많으면 절전의 영향일 수 있음
+        if (sufficient && st.CpuPerfUnderLoad < CpuThrottledPct)
+        {
+            string onBatteryNote = st.OnBatteryPct >= 30 ? $" 배터리로 쓴 시간이 {st.OnBatteryPct:0}%라 절전 설정의 영향일 수 있습니다." : "";
+            r.Findings.Add($"CPU 를 많이 쓸 때의 속도가 정격의 {st.CpuPerfUnderLoad:0}%로 제한됩니다 — 발열(먼지·서멀)이나 전원 설정을 점검하세요.{onBatteryNote}");
         }
 
         // 5) 안정성
@@ -277,6 +372,7 @@ public static class UpgradeAdvisor
         {
             int cycleCount = inv.Batteries.Sum(b => b.CycleCount ?? 0);
             string cycles = cycleCount > 0 ? $", 충전 횟수 {cycleCount}회" : "";
+            if (st.OnBatteryPct >= 1) cycles += $", 측정 기간의 {st.OnBatteryPct:0}%를 배터리로 사용";
             if (battery <= BatteryReplaceHighPct)
                 Add("BATTERY_REPLACE", "High", "배터리 교체",
                     $"배터리 수명이 설계 용량의 {battery:0}%로 크게 줄었습니다{cycles}. 전원 없이 쓸 수 있는 시간이 매우 짧고 갑자기 꺼질 수 있습니다.");
@@ -303,8 +399,23 @@ public static class UpgradeAdvisor
             : recs.Count > 0 ? ("Watch", "점검 필요")
             : sufficient ? ("Ok", "양호")
             : ("InsufficientData", "데이터 부족");
+
+        SubmissionSummary.Build(r, inv, basisLabel);
         return r;
     }
+
+    /// <summary>권고 문장에 붙이는 보강 근거: 시간 환산, 빠듯한 구간, 실제 지연 여부.</summary>
+    private static string MemEvidence(UsageStats st)
+    {
+        var parts = new List<string> { $"8시간 사용 기준 하루 약 {UsageStats.MinutesPer8h(st.MemPressurePct):0.#}분" };
+        if (st.MemTight20Pct > 0) parts.Add($"가용 20% 이하로 쓴 시간 {st.MemTight20Pct:0.#}%");
+        if (HardFaultRatio(st) >= 3) parts.Add($"부족할 때 하드 페이지 폴트가 평소의 약 {HardFaultRatio(st):0}배");
+        return string.Join(", ", parts);
+    }
+
+    /// <summary>메모리 부족이던 분의 하드 폴트가 평소(부족하지 않던 분)의 몇 배인지. 표본이 부족하면 null.</summary>
+    internal static double? HardFaultRatio(UsageStats st) =>
+        st.HardFaultsPressureMedian is { } pressure && st.HardFaultsCalmMedian is { } calm ? pressure / Math.Max(calm, 1) : null;
 
     /// <summary>현지 시각이 설정의 업무시간(기본 평일 9~18시)인지.</summary>
     internal static bool IsWorkTime(DateTimeOffset local, AgentConfig c)
@@ -322,7 +433,8 @@ public static class UpgradeAdvisor
         foreach (var e in events)
         {
             if (e.Kind != kind || e.Processes is not { Count: > 0 }) continue;
-            var ranked = e.RankedProcesses().Take(5).ToList();
+            // 이름 기준으로 합친 순위(같은 이름이 경로만 달라 두 줄이면 한 이벤트에서 두 번 세어지는 것을 방지)
+            var ranked = e.RankedByName().Take(5).ToList();
             for (int i = 0; i < ranked.Count; i++)
             {
                 var p = ranked[i];

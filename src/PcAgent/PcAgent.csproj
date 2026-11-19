@@ -5,7 +5,7 @@
     <TargetFramework>$(NetVersion)-windows</TargetFramework>
     <RootNamespace>PcAgent</RootNamespace>
     <AssemblyName>PcAgent</AssemblyName>
-    <Version>0.4.0</Version>
+    <Version>0.5.0</Version>
     <Product>PC Health Agent</Product>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsAotCompatible>true</IsAotCompatible>

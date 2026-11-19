@@ -37,6 +37,23 @@ internal static unsafe partial class Native
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool GetPhysicallyInstalledSystemMemory(out ulong totalMemoryInKilobytes);
 
+    // ---------------- 전원 ----------------
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct SYSTEM_POWER_STATUS
+    {
+        public byte ACLineStatus;        // 0 = 배터리, 1 = 전원 연결, 255 = 알 수 없음
+        public byte BatteryFlag;
+        public byte BatteryLifePercent;
+        public byte SystemStatusFlag;
+        public uint BatteryLifeTime;
+        public uint BatteryFullLifeTime;
+    }
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS status);
+
     // ---------------- 프로세스 ----------------
 
     internal const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;

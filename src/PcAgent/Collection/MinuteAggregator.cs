@@ -22,6 +22,8 @@ public sealed class MinuteAggregator
     private double _hardSum, _diskSum, _diskMax, _queueSum;
     private int _hardN, _diskN, _queueN;
     private int _cpuHighSec, _memPressureSec, _diskBusySec;
+    private double _commitGbMax, _perfSum, _latencySum, _latencyMax;
+    private int _commitGbN, _perfN, _latencyN, _batteryN, _batterySec;
 
     public MinuteAggregator(SampleThresholds thresholds, int intervalSeconds)
     {
@@ -72,6 +74,20 @@ public sealed class MinuteAggregator
         if (s.CpuPercent >= _thresholds.CpuHigh) _cpuHighSec += sec;
         if (s.MemAvailPercent <= _thresholds.MemAvailLow || s.CommitPercent >= _thresholds.CommitHigh) _memPressureSec += sec;
 
+        if (s.CommitGb is { } cg) { _commitGbMax = Math.Max(_commitGbMax, cg); _commitGbN++; }
+        // CPU 속도는 30초에 한 번만 들어옴(값 자체가 그 구간에서 명령을 실행한 동안의 평균). 한가한 분의 저속은 분석 때 걸러냄
+        if (s.CpuPerfPercent is { } perf) { _perfSum += perf; _perfN++; }
+        if (s.DiskLatencyMs is { } lat)
+        {
+            _latencyMax = Math.Max(_latencyMax, lat);
+            if (lat > 0) { _latencySum += lat; _latencyN++; }   // I/O 가 없던 샘플(0)은 평균에서 제외
+        }
+        if (s.OnBattery is { } battery)
+        {
+            _batteryN++;
+            if (battery) _batterySec += sec;
+        }
+
         return completed;
     }
 
@@ -101,6 +117,11 @@ public sealed class MinuteAggregator
         CpuHighSeconds = _cpuHighSec,
         MemPressureSeconds = _memPressureSec,
         DiskBusySeconds = _diskBusySec,
+        CommitGbMax = _commitGbN > 0 ? Math.Round(_commitGbMax, 2) : null,
+        CpuPerfAvg = _perfN > 0 ? R(_perfSum / _perfN) : null,
+        DiskLatencyAvg = _latencyN > 0 ? Math.Round(_latencySum / _latencyN, 2) : null,
+        DiskLatencyMax = _latencyN > 0 ? Math.Round(_latencyMax, 2) : null,
+        BatterySeconds = _batteryN > 0 ? _batterySec : null,
     };
 
     private void Reset()
@@ -112,6 +133,8 @@ public sealed class MinuteAggregator
         _hardSum = _diskSum = _diskMax = _queueSum = 0;
         _hardN = _diskN = _queueN = 0;
         _cpuHighSec = _memPressureSec = _diskBusySec = 0;
+        _commitGbMax = _perfSum = _latencySum = _latencyMax = 0;
+        _commitGbN = _perfN = _latencyN = _batteryN = _batterySec = 0;
     }
 
     private static DateTimeOffset Truncate(DateTimeOffset t) =>

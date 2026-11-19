@@ -95,10 +95,10 @@ internal static class FleetReport
                     $"{(disk?.Health is { } dh ? $"<div class=\"muted\">{H(DiskHealth.LevelLabel(dh.Level))}{(dh.PercentageUsed is { } pu ? $" · 수명 {pu}%" : "")}</div>" : "")}</td>" +
                     $"<td class=\"n\">{(inv.EstimatedAgeYears is { } age ? $"{age:0.#}년" : "-")}</td>" +
                     $"<td class=\"nw\">{H(Exporter.Win11Label(a.Win11.Status))}</td>" +
-                    $"<td class=\"n\">{a.Stats.MemPressurePct:0.#}%</td>" +
-                    $"<td class=\"n\">{a.Stats.CpuHighPct:0.#}%</td>" +
+                    $"<td class=\"n\">{a.Stats.MemPressurePct:0.#}%<div class=\"muted\">하루 약 {UsageStats.MinutesPer8h(a.Stats.MemPressurePct):0.#}분</div></td>" +
+                    $"<td class=\"n\">{a.Stats.CpuHighPct:0.#}%<div class=\"muted\">하루 약 {UsageStats.MinutesPer8h(a.Stats.CpuHighPct):0.#}분</div></td>" +
                     $"<td class=\"n\">{(inv.BatteryHealthPercent is { } bat ? $"{bat:0}%" : "-")}</td>" +
-                    $"<td class=\"n\">{a.Stats.BasisHours:0.#}h</td>" +
+                    $"<td class=\"n\">{a.Stats.BasisHours:0.#}h{(a.Stats.BasisDays > 0 ? $"<div class=\"muted\">{a.Stats.BasisDays}일</div>" : "")}</td>" +
                     $"<td class=\"n\">{Exporter.Local(s.GeneratedUtc, tz):yyyy-MM-dd}<div class=\"muted\">v{H(s.AgentVersion)}</div></td>" +
                     "</tr>");
         }
@@ -117,7 +117,7 @@ internal static class FleetReport
 
         w.Write("<footer>");
         if (skipped.Count > 0) w.Write($"<p>읽지 못한 파일 {skipped.Count}개: {H(string.Join(", ", skipped))}</p>");
-        w.Write("<p>판정 기준은 각 PC 리포트(report.html)의 권장 조치 설명을 참고하세요. 임계값은 파일럿 결과를 보고 조정할 수 있습니다.</p></footer></div></body></html>");
+        w.Write("<p>'하루 약 N분'은 부족 비율을 8시간 사용 기준으로 환산한 값입니다. 판정 기준은 각 PC 리포트(report.html)의 요약과 권장 조치 설명을 참고하세요. 임계값은 파일럿 결과를 보고 조정할 수 있습니다.</p></footer></div></body></html>");
     }
 
     private const string ExtraCss = """

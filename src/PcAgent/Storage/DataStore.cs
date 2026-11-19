@@ -5,16 +5,21 @@ using PcAgent.Collection;
 namespace PcAgent.Storage;
 
 /// <summary>
-/// 로컬 파일 저장소. DB 없이 일 단위 파일에 append 만 합니다(분당 1회, 약 150바이트).
+/// 로컬 파일 저장소. DB 없이 일 단위 파일에 append 만 합니다(분당 1회, 약 100바이트).
 ///   data\metrics-yyyyMMdd.csv   : 1분 집계 지표 (UTC 날짜 기준)
 ///   data\pressure-yyyyMMdd.jsonl: 자원 부족 이벤트(시작/종료 레코드)
 /// 사용자가 파일을 엑셀 등으로 열어 잠그면 줄을 메모리에 모아 두었다가 잠금이 풀리면 씁니다.
 /// </summary>
 public sealed class DataStore(string dataDir)
 {
+    /// <summary>
+    /// 열은 뒤에만 추가합니다(v0.5.0: commit_gb_max 부터 5개). 읽을 때는 열 개수로 구분하므로 이전 버전이 쓴 줄도 그대로 읽습니다.
+    /// 업데이트한 날의 파일은 이전 머리글 아래에 새 형식 줄이 이어질 수 있습니다(내보낸 metrics_minute.csv 는 항상 새 머리글).
+    /// </summary>
     public const string MetricsHeader =
         "minute_utc,samples,covered_sec,cpu_avg,cpu_max,mem_avail_avg,mem_avail_min,commit_avg,commit_max," +
-        "hard_faults_avg,disk_active_avg,disk_active_max,disk_queue_avg,cpu_high_sec,mem_pressure_sec,disk_busy_sec";
+        "hard_faults_avg,disk_active_avg,disk_active_max,disk_queue_avg,cpu_high_sec,mem_pressure_sec,disk_busy_sec," +
+        "commit_gb_max,cpu_perf_avg,disk_latency_avg,disk_latency_max,battery_sec";
 
     private const string MetricsPrefix = "metrics-";
     private const string PressurePrefix = "pressure-";
@@ -46,7 +51,9 @@ public sealed class DataStore(string dataDir)
             F(m.HardFaultsAvg), F(m.DiskActiveAvg), F(m.DiskActiveMax), F(m.DiskQueueAvg),
             m.CpuHighSeconds.ToString(Inv),
             m.MemPressureSeconds.ToString(Inv),
-            m.DiskBusySeconds.ToString(Inv));
+            m.DiskBusySeconds.ToString(Inv),
+            F(m.CommitGbMax), F(m.CpuPerfAvg), F(m.DiskLatencyAvg), F(m.DiskLatencyMax),
+            m.BatterySeconds?.ToString(Inv) ?? "");
         Append(path, line, MetricsHeader);
     }
 
@@ -271,6 +278,14 @@ public sealed class DataStore(string dataDir)
             m.CpuHighSeconds = int.Parse(c[13], Inv);
             m.MemPressureSeconds = int.Parse(c[14], Inv);
             m.DiskBusySeconds = int.Parse(c[15], Inv);
+            if (c.Length >= 21)   // v0.5.0 부터
+            {
+                m.CommitGbMax = ND(c[16]);
+                m.CpuPerfAvg = ND(c[17]);
+                m.DiskLatencyAvg = ND(c[18]);
+                m.DiskLatencyMax = ND(c[19]);
+                m.BatterySeconds = c[20].Length == 0 ? null : int.Parse(c[20], Inv);
+            }
             return true;
         }
         catch (FormatException)
